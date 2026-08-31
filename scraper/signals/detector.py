@@ -129,6 +129,17 @@ def _analytics(ctx):
     return False, None
 
 
+def _advertising(ctx):
+    """Ad-spend intent: Meta Pixel, Google Ads, or display/ad tags."""
+    if re.search(r"fbq\(|facebook\.com/tr|connect\.facebook\.net", ctx.html, re.I):
+        return True, "meta pixel (ad) detected"
+    if re.search(r"doubleclick|adsbygoogle|googlesyndication|googleadservices|"
+                 r"taboola|outbrain", ctx.html, re.I):
+        return True, "ad network tag detected"
+    hit, ev = _any_src(ctx.scripts, r"doubleclick|adsbygoogle|googletagmanager|facebook\.net")
+    return (True, ev) if hit else (False, None)
+
+
 def _kw_signal(ctx, keywords):
     blob = (ctx.text or "").lower() + " " + (ctx.html or "").lower()
     for kw in keywords:
@@ -142,6 +153,7 @@ RICH_SIGNALS: dict = {
     "ga4":               {"fields": ["ga4"], "fn": _ga4},
     "gtm":               {"fields": ["gtm"], "fn": _gtm},
     "analytics":         {"fields": ["analytics"], "fn": _analytics},
+    "advertising":       {"fields": ["advertising"], "fn": _advertising},
     "booking_system":    {"fields": ["booking_system"], "fn": _booking},
     "chat_widget":       {"fields": ["chat_widget"], "fn": _chat_widget},
     "pricing":           {"fields": ["signal_pricing"], "fn": lambda c: _kw_signal(c, _SIGNAL_DEFS["pricing"])},
@@ -153,7 +165,8 @@ RICH_SIGNALS: dict = {
     "membership":        {"fields": ["signal_membership"], "fn": lambda c: _kw_signal(c, _SIGNAL_DEFS["membership"])},
 }
 
-TECH_FIELDS = ["meta_pixel", "ga4", "gtm", "analytics", "booking_system", "chat_widget"]
+TECH_FIELDS = ["meta_pixel", "ga4", "gtm", "analytics", "advertising",
+               "booking_system", "chat_widget"]
 
 
 class SignalDetector:

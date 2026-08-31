@@ -27,6 +27,7 @@ from .parsing import (
     decompose_address,
     parse_popular_times,
 )
+from .reviews import extract_reviews_from_panel
 from ..utils.text import to_int, to_float
 
 log = logging.getLogger(__name__)
@@ -257,7 +258,9 @@ class MapsCollector:
                  max_total_results: int = 0, include_permanently_closed: bool = False,
                  scroll_delay: tuple = (800, 1600), cooldown_seconds: float = 0.0,
                  hl: str = "en", gl: str = "us",
-                 maps_delay: tuple = (0.0, 0.0)):
+                 maps_delay: tuple = (0.0, 0.0),
+                 reviews_per_business: int = 5, collect_reviews: bool = True,
+                 on_query_total=None):
         self._bm = browser_manager
         self._max_per_query = max_results_per_query
         self._max_total = max_total_results
@@ -267,6 +270,9 @@ class MapsCollector:
         self._hl = hl
         self._gl = gl
         self._maps_delay = maps_delay
+        self._reviews_per_business = reviews_per_business
+        self._collect_reviews = collect_reviews
+        self._on_query_total = on_query_total  # callable(len(listing_links))
         self._yielded_total = 0
         self.limit_reached = False
 
@@ -308,13 +314,22 @@ class MapsCollector:
                     return
                 raise ZeroListingsError(query, _page_diagnostic(page))
 
-            for place_url in listing_links:
+            # Notify the caller of the total number of result cards found, so
+            # progress can render a "processing 12 of 96" style counter.
+            if self._on_query_total is not None:
+                try:
+                    self._on_query_total(len(listing_links))
+                except Exception:
+                    pass
+
+            for pos, place_url in enumerate(listing_links, start=1):
                 if self._max_total and self._yielded_total >= self._max_total:
                     self.limit_reached = True
                     break
                 if self._max_per_query and yielded >= self._max_per_query:
                     break
-                data = self._open_and_extract(page, place_url)
+                data = self._open_and_extract(page, place_url, position=pos,
+                                              total=len(listing_links))
                 if not data.get("business_name"):
                     parsed = parse_google_maps_url(place_url)
                     data["business_name"] = parsed.get("place_name") or "N/A"
@@ -335,8 +350,11 @@ class MapsCollector:
                 pass
 
     # -- click-driven detail-panel extraction -----------------------------
-    def _open_and_extract(self, page, place_url: str) -> dict:
+    def _open_and_extract(self, page, place_url: str, position: int = 0,
+                          total: int = 0) -> dict:
         data: dict = {}
+        data["_position"] = position
+        data["_total"] = total
         opened = self._click_to_open(page, place_url)
         if not opened:
             try:
@@ -368,6 +386,15 @@ class MapsCollector:
         data["timezone"] = "N/A"
 
         data["rating"], data["review_count"] = self._extract_rating_reviews(page)
+
+        # Reviews: if enabled, scroll the detail panel's review feed and
+        # capture top review texts for the analysis stage (sentiment/keywords).
+        if self._collect_reviews:
+            try:
+                data["_reviews"] = extract_reviews_from_panel(
+                    page, max_reviews=self._reviews_per_business)
+            except Exception:
+                data["_reviews"] = []
 
         data["business_hours"] = _extract_hours(page)
         data["business_status"] = self._business_status(page)
@@ -519,12 +546,21 @@ class MapsCollector:
             time.sleep(random.uniform(lo, hi) if hi > lo else hi)
 
 
+_DEMO_REVIEWS = [
+    "Great service, very professional and friendly team!",
+    "Quick, reliable, and reasonably priced. Highly recommend.",
+    "They arrived on time and did an excellent clean job.",
+]
+
+
 class DemoCollector:
     """Offline provider yielding a fixed set of rich sample records."""
 
     def collect(self, query: str) -> Iterator[dict]:
         for i in range(3):
             yield {
+                "_position": i + 1,
+                "_total": 3,
                 "business_name": f"Sample Business {i + 1}",
                 "category": "Local Service",
                 "subcategory": "Plumber",
@@ -550,6 +586,7 @@ class DemoCollector:
                 "cid": f"0x1{i}2:0x3{i}4",
                 "kgmid": f"/g/{1000 + i}",
                 "source_query": query,
+                "_reviews": [r for j, r in enumerate(_DEMO_REVIEWS) if j <= i],
             }
 
     def close(self) -> None:

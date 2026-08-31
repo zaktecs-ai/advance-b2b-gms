@@ -75,20 +75,21 @@ needed to flip modes later.
 
 ## Clean console + full logs
 
-The terminal shows structured, easy-to-read progress — each business listed
-with its number, local timestamp, and name, plus live totals, remaining
-queries, elapsed time, and ETA:
+The terminal shows structured, easy-to-read progress — how many results a
+query returned, which result is being processed (X of N), the business name
+and local time, plus a final summary:
 
 ```
 Advance B2B GMS — Lead Scraper
-job: campaign   |   queries: 2   |   started 10:35 PM
+job: campaign   |   queries: 2   |   started 10:49 PM
 ──────────────────────────────────────────────────────────────
 
 ━━━ [1/20] gyms in Houston, TX ━━━
-     1.  22:35:12   Anytime Fitness - Heights
-     2.  22:35:14   LA Fitness
-     3.  22:35:16   Planet Fitness
-   ↳ collected 3 · saved 3
+   found 96 results
+        1 of 96   22:35:12   Anytime Fitness - Heights
+        2 of 96   22:35:14   LA Fitness
+        3 of 96   22:35:16   Planet Fitness
+   ↳ collected 3 of 96 · saved 3
 
 ┌─ Run complete ──────────────────────────────
    Total collected : 320

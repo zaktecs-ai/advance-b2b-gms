@@ -39,8 +39,11 @@ log = logging.getLogger(__name__)
 
 _SOCIAL_COLS = ["facebook", "instagram", "linkedin", "youtube", "twitter_x",
                 "tiktok", "pinterest", "github", "snapchat"]
-_TECH_COLS = ["cms", "analytics", "tag_manager", "meta_pixel", "ga4", "gtm",
-              "advertising", "booking_system", "chat_widget", "ssl"]
+# Columns sourced from the tech detector (string values like cms=WordPress).
+_TECH_COLS = ["cms", "analytics", "tag_manager", "ssl"]
+# Columns sourced from the signal detector (YES/NO toggle values).
+_BOOL_TECH_COLS = ["meta_pixel", "ga4", "gtm", "advertising",
+                   "booking_system", "chat_widget"]
 _SIGNAL_COLS = ["signal_pricing", "signal_financing", "signal_licensed_insured",
                 "signal_established", "signal_portfolio", "signal_mobile_service",
                 "signal_membership"]
@@ -142,7 +145,9 @@ class Pipeline:
             self.counters["collected"] += 1
             self._query_collected += 1
             name = (raw or {}).get("business_name") or "—"
-            self._progress.business_collected(self._query_collected, name)
+            pos = (raw or {}).get("_position") or self._query_collected
+            total = (raw or {}).get("_total") or 0
+            self._progress.business_collected(pos, name, total)
             rec = self._normalize_record(raw, query, keyword)
             if not rec:
                 continue
@@ -159,6 +164,9 @@ class Pipeline:
         for k, v in raw.items():
             if k in OUTPUT_COLUMNS:
                 rec[k] = v if v not in (None, "") else "N/A"
+        # Reviews are passed through for the analysis stage (not an output col).
+        if raw.get("_reviews"):
+            rec["_reviews"] = list(raw["_reviews"])
         rec["source_query"] = query
         rec["source_keyword"] = keyword
         loc = re.split(r"\s+(?:in|near)\s+", query, maxsplit=1, flags=re.I)[-1] if re.search(r"\s+(?:in|near)\s+", query, re.I) else "N/A"
@@ -254,12 +262,19 @@ class Pipeline:
             elif enr.social.get(c) and enr.social[c] != "N/A":
                 rec[c] = enr.social[c]
 
-        # Tech columns.
+        # Tech columns (string values from the tech detector).
         for c in _TECH_COLS:
             rec[c] = enr.tech.get(c, "N/A")
+        # tag_manager (string) + gtm (YES/NO) both exist; map each correctly.
+        rec["tag_manager"] = enr.tech.get("tag_manager", "N/A")
         rec["tech_stack"] = enr.tech.get("tech_stack", "N/A") or "N/A"
 
-        # Signal columns (YES/NO).
+        # Boolean tech columns from the signal detector (YES/NO).
+        for c in _BOOL_TECH_COLS:
+            val = enr.signals.get(c, "NO")
+            rec[c] = "yes" if val == "YES" else "NO"
+
+        # Business signal columns (YES/NO).
         for c in _SIGNAL_COLS:
             rec[c] = enr.signals.get(c, "NO")
 

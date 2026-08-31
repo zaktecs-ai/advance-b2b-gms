@@ -112,6 +112,14 @@ def _strip_tags(html: str) -> str:
 
 # -- Live-panel fallback ----------------------------------------------------
 
+# Review body text renders inside rolling cards (jftiEf) whose text lives in a
+# span. The "Reviews" tab button has an aria-label like "381 reviews".
+_REVIEW_TAB_SELECTORS = [
+    'button[aria-label*="reviews"]',
+    'button[jsaction*="review"]',
+    'button:has-text("Reviews")',
+    'div[role="tab"]:has-text("Reviews")',
+]
 _REVIEW_TEXT_SELECTORS = [
     'div[class*="jftiEf"] span[class*="wiI7pd"]',
     'div[class*="jftiEf"]',
@@ -119,16 +127,43 @@ _REVIEW_TEXT_SELECTORS = [
 ]
 
 
-def extract_reviews_from_panel(page, max_reviews: int = 5) -> list:
-    """Scroll the open panel's review feed and return up to max_reviews texts."""
+def open_reviews_tab(page) -> bool:
+    """Click the Reviews tab so the review feed becomes the scroll target."""
+    for sel in _REVIEW_TAB_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
+                loc.click(timeout=4000)
+                time.sleep(1.5)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def extract_reviews_from_panel(page, max_reviews: int = 5,
+                               open_tab: bool = True) -> list:
+    """Open the reviews feed and pull up to ``max_reviews`` review texts.
+
+    ``open_tab`` first clicks the Reviews tab (so the feed becomes scrollable),
+    then repeatedly scrolls and harvests unique review bodies.
+    """
     texts: list = []
     seen: set = set()
-    for _ in range(max(2, max_reviews)):
+    if open_tab:
         try:
-            page.mouse.wheel(0, 1500)
+            open_reviews_tab(page)
         except Exception:
             pass
-        time.sleep(0.8)
+
+    # Several scrolling passes; the feed lives inside the detail panel.
+    scroll_attempts = max(3, max_reviews)
+    for _ in range(scroll_attempts):
+        try:
+            page.mouse.wheel(0, 1800)
+        except Exception:
+            pass
+        time.sleep(0.6)
         for sel in _REVIEW_TEXT_SELECTORS:
             try:
                 locs = page.locator(sel)

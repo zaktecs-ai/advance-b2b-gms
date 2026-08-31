@@ -131,17 +131,29 @@ class ProgressConsole:
         self.current_query_text = query_text
         self.query_collected = 0
         self.query_saved = 0
+        self.query_total = 0
         bar = _c(_Color.cyan, f"[{index}/{self.total_queries}] {query_text}")
         self._print("")
         self._print(_c(_Color.bold, "━━━ " + bar + " ━━━"))
 
-    def business_collected(self, number: int, name: str) -> None:
-        """A business was extracted — stream a numbered line with timestamp."""
+    def query_total(self, total: int) -> None:
+        """Record the number of result cards Google returned for this query."""
+        self.query_total = total
+        self._print(_c(_Color.dim, f"   found {total} results"))
+
+    def business_collected(self, number: int, name: str, total: int = 0) -> None:
+        """A business was extracted — stream 'X of N' + timestamp + name."""
         self.total_collected += 1
         self.query_collected += 1
+        if total:
+            self.query_total = total
         stamp = _c(_Color.dim, _now())
-        idx = _c(_Color.green, f"{number:>3}.")
-        self._print(f"   {idx}  {stamp}   {_truncate(name, 44)}")
+        # "12 of 96" position indicator (falls back to plain number when unknown).
+        if self.query_total > 0:
+            pos = _c(_Color.green, f"{number:>3} of {self.query_total}")
+        else:
+            pos = _c(_Color.green, f"{number:>3}")
+        self._print(f"   {pos}   {stamp}   {_truncate(name, 40)}")
         self._render_footer()
 
     def business_saved(self) -> None:
@@ -163,7 +175,9 @@ class ProgressConsole:
     def query_done(self) -> None:
         # clear footer, then a per-query summary line
         self._print_footer("")
-        summary = (f"   ↳ collected {self.query_collected} · saved {self.query_saved}")
+        total = f" of {self.query_total}" if self.query_total else ""
+        summary = (f"   ↳ collected {self.query_collected}{total} · "
+                   f"saved {self.query_saved}")
         self._print(_c(_Color.green, summary))
         self._print("")
 
@@ -205,8 +219,11 @@ class ProgressConsole:
         self._last_render = now
         saved = _c(_Color.green, f"saved {self.total_saved}")
         remaining = _c(_Color.magenta, f"{self._remaining_queries()} left")
+        pos = ""
+        if self.query_total > 0:
+            pos = f"  ·  result {min(self.query_collected, self.query_total)} of {self.query_total}"
         parts = (
-            f"▸ {saved}  ·  collected {self.total_collected}  ·  "
+            f"▸ {saved}  ·  collected {self.total_collected}{pos}  ·  "
             f"{remaining} queries  ·  elapsed {_fmt_duration(self.elapsed())}  ·  "
             f"ETA ~{self._eta()}"
         )

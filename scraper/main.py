@@ -22,7 +22,7 @@ from .pipeline import Pipeline
 from .utils.logging_utils import setup_logging
 
 
-def _build_collector(config, demo: bool, browser_manager):
+def _build_collector(config, demo: bool, browser_manager, progress=None):
     if demo:
         return DemoCollector()
     m = config.maps
@@ -35,6 +35,9 @@ def _build_collector(config, demo: bool, browser_manager):
         cooldown_seconds=config.delays.cooldown_seconds,
         hl=m.hl, gl=m.gl,
         maps_delay=(config.delays.maps_min_seconds, config.delays.maps_max_seconds),
+        reviews_per_business=config.reviews.per_business,
+        collect_reviews=config.reviews.enabled,
+        on_query_total=(progress.query_total if progress is not None else None),
     )
 
 
@@ -49,6 +52,12 @@ def run(config_path: str, demo: bool) -> int:
     # the console stays clean (progress only).
     out_dir = Path(config.job.output_dir) / config.job.client_name
     setup_logging("INFO", log_file=str(out_dir / "run.log"))
+
+    # Clean console progress reporter (structured, with business names).
+    from .utils.progress import ProgressConsole
+    progress = ProgressConsole(total_queries=len(config.queries),
+                               client_name=config.job.client_name,
+                               quiet=config.logging.quiet if hasattr(config, "logging") else False)
 
     browser_manager = None
     collector = None
@@ -70,16 +79,10 @@ def run(config_path: str, demo: bool) -> int:
             nav_timeout_ms=m.page_navigation_timeout_ms,
             display=config.vnc.display if not m.headless else None,
         )
-        collector = _build_collector(config, demo, browser_manager)
+        collector = _build_collector(config, demo, browser_manager, progress)
 
     if collector is None:
         collector = DemoCollector()
-
-    # Clean console progress reporter (structured, with business names).
-    from .utils.progress import ProgressConsole
-    progress = ProgressConsole(total_queries=len(config.queries),
-                               client_name=config.job.client_name,
-                               quiet=config.logging.quiet if hasattr(config, "logging") else False)
 
     pipeline = Pipeline(config, collector=collector, browser_manager=browser_manager,
                         progress=progress)
