@@ -9,8 +9,14 @@ job:
   default_country: US
 
 queries:
+  - "plumbers in Houston, TX"
   - "dentists in Dallas, TX"
-  - "pool & spa service in Austin, TX"
+  - "roofing contractors in Austin, TX"
+  - "chiropractors in Phoenix, AZ"
+  - "hair salons in Chicago, IL"
+  - "coffee shops in Seattle, WA"
+  - "gyms in Miami, FL"
+  - "restaurants in New York, NY"
 
 maps:
   headless: true
