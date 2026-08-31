@@ -1,0 +1,8 @@
+# Runtime deps for the standalone B2B lead scraper.
+# Demo mode + analysis + CSV/JSON export need only the first two.
+PyYAML>=6.0          # config.yaml parsing
+pytest>=7.0          # running the test suite
+# Optional (used only if installing the one-line scaler tooling target):
+#   botasaurus-api is NOT used here; the core is dependency-light on purpose.
+# To enable xlsx output, uncomment:
+# openpyxl>=3.1

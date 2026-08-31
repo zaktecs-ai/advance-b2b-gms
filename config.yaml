@@ -1,0 +1,34 @@
+# ============================================================================
+#  STANDALONE B2B LEAD SCRAPER — CONFIGURATION
+#  One file drives a job. Copy to wherever you run; keep secrets out of VCS.
+# ============================================================================
+
+job:
+  client_name: campaign
+  output_dir: output
+
+queries:
+  - "pool & spa service in Dallas, TX"
+  - "dentist in Austin, TX"
+
+maps:
+  headless: true
+  hl: "en"
+  gl: "us"
+  max_results_per_query: 0        # 0 = unlimited
+  max_total_results: 0            # 0 = unlimited
+
+# The FREE review-quality add-on. Runs entirely offline; no paid APIs.
+reviews:
+  enabled: true
+  per_business: 5
+  min_len: 20
+  max_len: 600
+
+enrichment:
+  emails: true
+  require_website: false
+
+runtime:
+  website_workers: 4
+  playwright_workers: 2

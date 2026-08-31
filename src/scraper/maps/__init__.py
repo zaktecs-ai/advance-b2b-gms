@@ -1,0 +1,1 @@
+"""Google Maps collection seam."""

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime output
+output/
+leads.csv
+leads.xlsx
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.log
