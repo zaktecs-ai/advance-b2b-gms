@@ -139,31 +139,46 @@ class PlaywrightCollector(Collector):
         sep = "&" if "?" in base else "?"
         return f"{base}{sep}hl={self.hl}&gl={self.gl}&z={self.zoom}"
 
+    def _wait_for_cards(self, page, timeout_ms: int = 25000) -> str | None:
+        """Poll for result cards to appear; return the first selector that
+        matches, or None on timeout."""
+        import time as _time
+        deadline = _time.monotonic() + timeout_ms / 1000.0
+        while _time.monotonic() < deadline:
+            # Dismiss consent / cookie walls if they pop up.
+            handle_consent_wall(page)
+            for sel in RESULT_CARD_SELECTORS:
+                try:
+                    if page.locator(sel).count() > 0:
+                        return sel
+                except Exception:
+                    continue
+            page.wait_for_timeout(1000)
+        return None
+
     def collect(self, query: str) -> Iterator[dict]:
         if self._browser is None:
             self._launch()
         page = self._page
         url = self._search_url(query)
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(int(self.scroll_pause * 1000))
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
         handle_consent_wall(page)
+
+        # Google Maps is a heavy SPA — results feed loads asynchronously.
+        chosen_selector = self._wait_for_cards(page)
+        if chosen_selector is None:
+            log.warning("Zero listing cards for query %r (waited for feed)", query)
+            return
 
         seen_urls: set[str] = set()
         scrolls = 0
         yielded = 0
         while True:
-            cards = page.locator(RESULT_CARD_SELECTORS[0])
-            # Fall back across selectors until we find cards or exhaust.
-            card_count = 0
-            chosen_selector = None
-            for sel in RESULT_CARD_SELECTORS:
-                c = page.locator(sel)
-                if c.count() > 0:
-                    card_count = c.count()
-                    chosen_selector = sel
-                    break
+            try:
+                card_count = page.locator(chosen_selector).count()
+            except Exception:
+                card_count = 0
             if card_count == 0:
-                log.warning("Zero listing cards for query %r", query)
                 break
 
             hrefs = page.eval_on_selector_all(
@@ -185,6 +200,7 @@ class PlaywrightCollector(Collector):
                 break
             if self.max_scrolls and scrolls >= self.max_scrolls:
                 break
+            # Scroll the results feed (it is the scroll container, not the page).
             try:
                 page.mouse.wheel(0, 2500)
             except Exception:
