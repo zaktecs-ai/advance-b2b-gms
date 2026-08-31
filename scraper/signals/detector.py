@@ -7,7 +7,7 @@ about/team/LinkedIn pages.
 
 The detector exposes BOTH a compact ``detect_signals()`` (business keywords,
 backward-compatible) and a richer ``SignalDetector`` that emits the YES/NO
-outcome columns the 85-column schema uses (meta_pixel, ga4, gtm, analytics,
+outcome columns used by the export contract (meta_pixel, ga4, gtm, analytics,
 booking_system, chat_widget, etc.).
 """
 from __future__ import annotations
@@ -15,16 +15,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..utils.normalize import normalize_text
+
 
 @dataclass
 class PageContext:
     text: str = ""
     html: str = ""
     url: str = ""
-    urls: list = field(default_factory=list)
-    scripts: list = field(default_factory=list)
+    urls: list[str] = field(default_factory=list)
+    scripts: list[str] = field(default_factory=list)
     structured: str = ""
-    technologies: set = field(default_factory=set)
+    technologies: set[str] = field(default_factory=set)
 
 
 # Built-in lead-gen signals (keyword-driven, business signals).
@@ -170,7 +172,7 @@ TECH_FIELDS = ["meta_pixel", "ga4", "gtm", "analytics", "advertising",
 
 
 class SignalDetector:
-    """Yields YES/NO outcome columns for the 85-column schema."""
+    """Yield YES/NO outcome columns for the export contract."""
 
     def __init__(self, custom_signals: dict | None = None):
         self._custom = custom_signals or {}
@@ -197,31 +199,57 @@ class SignalDetector:
 
 # -- Decision-maker extraction ----------------------------------------------
 
-_TITLE_PATTERNS = [
-    r"\b(CEO|Chief Executive Officer|Founder|Co-Founder|Owner|President|"
-    r"Managing Director|Principal|Partner|Manager|Director|Proprietor)\b",
-]
-
+_TITLE_PATTERN = (
+    r"CEO|Chief Executive Officer|Founder|Co-Founder|Owner|President|"
+    r"Managing Director|Principal|Partner|Manager|Director|Proprietor"
+)
+_TITLE_RE = re.compile(rf"\b({_TITLE_PATTERN})\b", re.I)
+_NAME_RE = re.compile(
+    r"\b(?:[A-ZÀ-ÖØ-Ý][\w'’.-]*)(?:\s+[A-ZÀ-ÖØ-Ý][\w'’.-]*){1,3}\b"
+)
 _NAME_TITLE_RE = re.compile(
-    r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s*[,\-–—]\s*"
-    r"(CEO|Chief Executive Officer|Founder|Co-Founder|Owner|President|"
-    r"Managing Director|Principal|Partner|Director|Proprietor|Manager)",
+    rf"(?P<name>{_NAME_RE.pattern})\s*[,;:\-–—]\s*"
+    rf"(?P<title>{_TITLE_PATTERN})\b|"
+    rf"(?P<title_before>{_TITLE_PATTERN})\s*[,;:\-–—:]\s*(?P<name_after>{_NAME_RE.pattern})",
     re.I,
 )
 
 
+def _clean_person_name(value: str) -> str:
+    cleaned = normalize_text(value).strip(" ,;:-–—")
+    if cleaned == "N/A":
+        return cleaned
+    cleaned = re.sub(
+        rf"^(?:{_TITLE_PATTERN})\s+", "", cleaned, flags=re.I
+    )
+    return cleaned.strip(" ,;:-–—") or "N/A"
+
+
 def extract_decision_maker(text: str) -> tuple[str, str]:
-    """Return (name, title) from an about/team page, or ('', '')"""
-    if not text:
+    """Return the first high-confidence ``(name, title)`` pair."""
+    cleaned = normalize_text(text)
+    if cleaned == "N/A":
         return "", ""
-    m = _NAME_TITLE_RE.search(text)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    tm = re.search(_TITLE_PATTERNS[0], text, re.I)
-    if tm:
-        title = tm.group(1)
-        prefix = text[: tm.start()]
-        names = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b", prefix)
-        if names:
-            return names[-1].strip(), title
+
+    match = _NAME_TITLE_RE.search(cleaned)
+    if match:
+        name = match.group("name") or match.group("name_after") or ""
+        title = match.group("title") or match.group("title_before") or ""
+        name = _clean_person_name(name)
+        title = normalize_text(title)
+        if name != "N/A" and title != "N/A":
+            return name, title
+
+    title_match = _TITLE_RE.search(cleaned)
+    if not title_match:
+        return "", ""
+    title = normalize_text(title_match.group(1))
+    before = cleaned[max(0, title_match.start() - 80): title_match.start()]
+    after = cleaned[title_match.end(): title_match.end() + 80]
+    for candidate in (after, before):
+        name_match = _NAME_RE.search(candidate)
+        if name_match:
+            name = _clean_person_name(name_match.group(0))
+            if name != "N/A":
+                return name, title
     return "", ""

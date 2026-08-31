@@ -1,9 +1,10 @@
 """Pipeline end-to-end (demo mode) + quality gate."""
 from scraper.config import load_config
 from scraper.maps.collector import DemoCollector
-from scraper.pipeline import Pipeline
 from scraper.models import OUTPUT_COLUMNS
-from scraper.validation.quality import quality_issues, passes_quality
+from scraper.pipeline import Pipeline
+from scraper.validation.quality import passes_quality, quality_issues
+from scraper.websites.enricher import Enrichment
 
 
 def test_pipeline_demo_end_to_end(tmp_path):
@@ -26,6 +27,42 @@ def test_pipeline_demo_end_to_end(tmp_path):
     for col in OUTPUT_COLUMNS:
         assert col in header
     assert len(lines) > 1
+
+
+def test_pipeline_maps_decision_maker_fields(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "queries: ['plumbers in Dallas']\n"
+        f"job:\n  output_dir: '{tmp_path}/out'\n  client_name: mapping\n"
+        "enrichment:\n  decision_makers: true\n",
+        encoding="utf-8",
+    )
+    pipeline = Pipeline(load_config(str(config_path)), DemoCollector())
+
+    class StubEnricher:
+        def enrich(self, website):
+            return Enrichment(
+                website_status="LIVE",
+                decision_maker_name="John Smith",
+                decision_maker_title="CEO",
+            )
+
+        def close(self):
+            pass
+
+    pipeline.enricher = StubEnricher()
+    try:
+        record = pipeline._normalize_record(
+            {"business_name": "Acme", "website": "https://acme.com", "city": "Dallas"},
+            "plumbers in Dallas",
+            "plumbers",
+        )
+        pipeline._enrich(record, record["website"])
+        assert record["decision_maker_name"] == "John Smith"
+        assert record["decision_maker_title"] == "CEO"
+    finally:
+        pipeline.csv.close()
+        pipeline.checkpoint.close()
 
 
 def test_quality_gate_missing_name():

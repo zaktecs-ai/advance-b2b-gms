@@ -1,6 +1,10 @@
 """Maps parsing: rating/reviews, address decomposition, URL parsing."""
 from scraper.maps.parsing import (
-    parse_rating_reviews, parse_address, parse_google_maps_url, classify_open_status,
+    classify_open_status,
+    decompose_address,
+    parse_address,
+    parse_google_maps_url,
+    parse_rating_reviews,
 )
 
 
@@ -30,6 +34,18 @@ def test_address_decompose():
 def test_address_empty():
     a = parse_address("")
     assert a["city"] == "" and a["state"] == ""
+
+
+def test_address_international_formats_are_conservative():
+    assert decompose_address("10 Rue de Rivoli, 75001 Paris, France") == {
+        "city": "Paris", "state": "N/A", "postal_code": "75001", "country": "FR",
+    }
+    assert decompose_address("123 Queen St W, Toronto, ON M5V 3A8, Canada") == {
+        "city": "Toronto", "state": "ON", "postal_code": "M5V 3A8", "country": "CA",
+    }
+    assert decompose_address("ул. Тверская, 12, Москва, Russia") == {
+        "city": "Москва", "state": "N/A", "postal_code": "N/A", "country": "RU",
+    }
 
 
 def test_parse_maps_url_place_id():

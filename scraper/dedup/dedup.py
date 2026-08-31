@@ -41,7 +41,11 @@ def resolve_identity(record: dict, default_country: str = "US") -> dict:
     name = normalize_text(record.get("business_name"))
     raw_url = normalize_url(record.get("website", ""))
     domain = extract_domain(raw_url) if raw_url != "N/A" else ""
-    phone = normalize_phone(record.get("phone"), default_country)
+    record_country = str(record.get("country") or "").strip().upper()
+    phone_country = record_country if len(record_country) == 2 and record_country.isalpha() else default_country
+    phone = normalize_phone(
+        record.get("phone") or record.get("phone_international"), phone_country
+    )
     city = normalize_text(record.get("city")).lower()
 
     kgmid = _clean_id(record.get("kgmid"))

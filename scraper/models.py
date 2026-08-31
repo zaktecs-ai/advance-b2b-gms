@@ -4,9 +4,8 @@ Every column in ``OUTPUT_COLUMNS`` is the single source of truth for the CSV
 header, the XLSX sheet, and validation. Unavailable data is rendered with the
 configured missing-value (default ``"N/A"``) — never guessed or fabricated.
 
-The schema deliberately expands on a basic listing with the "gold mine"
-signals so a sales person can triage a lead at a glance: review-derived
-quality, social presence, ownership, and ad-spend intent.
+The schema contains only fields with a defined producer so every exported
+column has a clear data-flow owner and missing values are meaningful.
 """
 from __future__ import annotations
 
@@ -20,12 +19,10 @@ OUTPUT_COLUMNS: list[str] = [
     "kgmid", "place_id", "cid", "business_name", "category", "subcategory",
     "phone", "phone_international", "website", "address", "full_address",
     "city", "state", "postal_code", "country", "latitude", "longitude",
-    "plus_code", "google_maps_url", "timezone",
+    "plus_code", "google_maps_url",
     # --- Maps intelligence ---
-    "rating", "review_count", "reviews_per_rating", "claimed_status",
-    "business_status", "business_hours", "popular_times", "business_description",
-    "about", "owner", "owner_posts", "can_claim", "is_spending_on_ads",
-    "competitors", "featured_question", "gas_prices",
+    "rating", "review_count", "claimed_status", "business_status",
+    "business_hours", "business_description", "about",
     # --- Provenance ---
     "source_query", "source_location", "source_keyword",
     # --- Website intelligence ---
@@ -62,12 +59,19 @@ class BusinessRecord:
     evidence: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # Keep the dataclass aligned with the export contract; collector-only
+        # metadata is carried separately by the pipeline when needed.
+        self.data = {
+            key: value for key, value in self.data.items() if key in OUTPUT_COLUMNS
+        }
         self.data.setdefault("record_id", "")
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
+        if key not in OUTPUT_COLUMNS:
+            raise KeyError(f"unsupported output column: {key}")
         self.data[key] = value
 
     def as_row(self, missing: str = "N/A") -> list[str]:

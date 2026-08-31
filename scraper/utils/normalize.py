@@ -7,10 +7,23 @@ URL/phone/email normalization are shared with the wider scraping ecosystem.
 """
 from __future__ import annotations
 
+import html
 import ipaddress
 import re
 import unicodedata
-from urllib.parse import urlsplit, urlunsplit, parse_qsl
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
+
+try:  # Runtime dependency; the fallback keeps imports usable in minimal tools.
+    from ftfy import fix_text as _fix_text
+except ImportError:  # pragma: no cover - requirements.txt installs ftfy
+    _fix_text = None
+
+try:  # Runtime dependency; the fallback is deliberately conservative.
+    import phonenumbers
+    from phonenumbers import NumberParseException
+except ImportError:  # pragma: no cover - requirements.txt installs phonenumbers
+    phonenumbers = None
+    NumberParseException = ValueError
 
 # Tracking / analytics params that never contribute to identity or stored URLs.
 _TRACKING_PARAMS = {
@@ -54,18 +67,63 @@ _DISPOSABLE_DOMAINS = {
 }
 
 
-def _strip_accents(s: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+_HTML_TAG_RE = re.compile(r"<[^>]*>")
+_FORMATTING_NOISE = {
+    "\ufeff", "\u200b", "\u00ad", "\u061c", "\u180e", "\u200e", "\u200f",
+    "\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2060", "\u2066",
+    "\u2067", "\u2068", "\u2069", "\u206a", "\u206b", "\u206c", "\u206d",
+    "\u206e", "\u206f",
+}
+
+
+def _coerce_text(value) -> str:
+    """Decode text without silently losing non-ASCII characters."""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value.decode("cp1252", errors="replace")
+    return str(value)
 
 
 def normalize_text(value) -> str:
-    """Collapse whitespace, strip control chars; return 'N/A' for empty."""
+    """Return clean, language-preserving text or ``N/A`` for empty input.
+
+    Scraped values can contain mojibake (for example ``FranÃ§ais``), HTML
+    entities, tags, zero-width markers, bidi controls, and invalid replacement
+    characters.  Fix encoding first, decode entities, remove markup/control
+    noise, normalize Unicode composition, and finally collapse whitespace.
+    Valid non-English scripts and diacritics are intentionally preserved.
+    """
     if value is None:
         return "N/A"
-    s = str(value)
-    s = "".join(ch for ch in s if ch.isprintable() or ch in "\t ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s or "N/A"
+
+    s = _coerce_text(value)
+    if _fix_text is not None:
+        s = _fix_text(s)
+    # Decode at most twice so double-escaped entities are cleaned without
+    # repeatedly transforming ordinary ampersands.
+    for _ in range(2):
+        decoded = html.unescape(s)
+        if decoded == s:
+            break
+        s = decoded
+    s = _HTML_TAG_RE.sub(" ", s)
+    s = unicodedata.normalize("NFC", s).replace("\ufffd", "")
+
+    cleaned: list[str] = []
+    for ch in s:
+        category = unicodedata.category(ch)
+        if ch in "\t\r\n" or category.startswith("Z"):
+            cleaned.append(" ")
+        elif category == "Cc" or ch in _FORMATTING_NOISE:
+            # Drop control and known formatting noise such as NUL, BOM, bidi
+            # marks, and zero-width spaces; retain valid script joiners.
+            continue
+        else:
+            cleaned.append(ch)
+    result = re.sub(r"\s+", " ", "".join(cleaned)).strip()
+    return result or "N/A"
 
 
 def _is_bare_ipv6_host(netloc: str) -> bool:
@@ -183,34 +241,54 @@ def canonical_domain(host: str) -> str:
 # ---------------------------------------------------------------------------
 
 def normalize_phone(raw: str | None, default_country: str = "US") -> str:
-    """Normalize a phone to a canonical E.164-ish numeric form or 'N/A'."""
-    if not raw or str(raw).strip().upper() == "N/A":
-        return "N/A"
-    digits = re.sub(r"\D", "", str(raw))
-    if not digits:
-        return "N/A"
-    cc = _COUNTRY_CODES.get(default_country.upper(), "1")
-    if digits.startswith("00"):
-        digits = digits[2:]
-    elif digits.startswith("+"):
-        digits = digits[1:]
-    # Strip a leading national trunk prefix (0 or 1) when the country code is
-    # prepended and the number is plausibly national-length (>= 10 digits).
-    if len(digits) >= 11 and digits.startswith(cc) and len(digits) - len(cc) >= 10:
-        return digits
-    if len(digits) >= 10 and not digits.startswith(cc):
-        # Best-effort national-to-international: prepend the country code.
-        candidate = cc + digits
-        if len(candidate) >= 11:
-            return candidate
-    return digits
+    """Return a metadata-checked E.164 number or ``N/A``.
 
+    ``default_country`` is used only for national-format input.  Explicit
+    international formats (``+...`` or ``00...``) are parsed independently.
+    Invalid, ambiguous, overlong, and too-short values are rejected instead of
+    being returned as plausible-looking digit strings.
+    """
+    if raw is None:
+        return "N/A"
+    candidate = _coerce_text(raw).strip()
+    if not candidate or candidate.upper() in {"N/A", "NA", "NONE", "NULL"}:
+        return "N/A"
 
-_COUNTRY_CODES = {
-    "US": "1", "CA": "1", "GB": "44", "AU": "61", "DE": "49", "FR": "33",
-    "IN": "91", "PK": "92", "NZ": "64", "IE": "353", "NL": "31", "ES": "34",
-    "IT": "39", "AE": "971", "SA": "966",
-}
+    # Google Maps commonly exposes ``phone:tel:+...`` as the attribute value;
+    # other sources use a plain ``tel:`` URI.
+    candidate = re.sub(r"^(?:phone:tel:|tel:)", "", candidate, flags=re.I).strip()
+    # Strip a terminal extension before validating the number token.  Other
+    # alphabetic words are source garbage, not phone syntax.
+    candidate = re.sub(r"(?:ext(?:ension)?|x)\s*[#.: -]*\d+$", "", candidate, flags=re.I).strip()
+    if not candidate or not re.fullmatch(r"[\d\s().,+-]+", candidate):
+        return "N/A"
+
+    explicit_region = candidate.startswith("+") or candidate.startswith("00")
+    if candidate.startswith("00"):
+        candidate = "+" + candidate[2:]
+    try:
+        if phonenumbers is not None:
+            parsed = phonenumbers.parse(
+                candidate,
+                None if explicit_region else (default_country or "US").upper(),
+            )
+            # `is_possible_number` checks country metadata and length without
+            # rejecting valid-looking test/VoIP/reserved ranges that do not
+            # have a carrier assignment in libphonenumber's data.
+            if not phonenumbers.is_possible_number(parsed):
+                return "N/A"
+            return phonenumbers.format_number(
+                parsed, phonenumbers.PhoneNumberFormat.E164
+            )
+    except (NumberParseException, ValueError, TypeError):
+        return "N/A"
+
+    # Minimal fallback for environments that import this module without the
+    # declared dependency. It never claims to validate a national number.
+    digits = re.sub(r"\D", "", candidate)
+    if not explicit_region or not 7 <= len(digits) <= 15:
+        return "N/A"
+    return f"+{digits}" if digits else "N/A"
 
 
 # ---------------------------------------------------------------------------

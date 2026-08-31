@@ -107,7 +107,6 @@ class BrowserManager:
         kwargs = {
             "viewport": {"width": 1366, "height": 900},
             "locale": locale or self._locale,
-            "timezone_id": "America/New_York",
             "user_agent": self._user_agent,
         }
         if ctx_proxy:

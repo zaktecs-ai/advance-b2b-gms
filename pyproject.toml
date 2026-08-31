@@ -7,6 +7,23 @@ name = "advance-b2b-gms"
 version = "1.0.0"
 description = "A clean-room, most-capable Google Maps B2B lead scraper"
 requires-python = ">=3.9"
+dependencies = [
+    "playwright>=1.40",
+    "httpx>=0.25",
+    "beautifulsoup4>=4.12",
+    "lxml>=4.9",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+    "dnspython>=2.4",
+    "openpyxl>=3.1",
+    "pydantic>=2.5",
+    "phonenumbers>=8.13",
+    "ftfy>=6.2",
+]
+
+[project.optional-dependencies]
+tech = ["wappalyzer-python3>=1.0"]
+test = ["pytest>=7.4"]
 
 [project.scripts]
 abgms = "scraper.main:main"

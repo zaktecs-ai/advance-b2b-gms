@@ -48,7 +48,7 @@ _FALLBACK_SIGNATURES: list = [
 ]
 
 
-def _fallback_detect(html: str, headers: dict | None = None) -> list:
+def _fallback_detect(html: str, headers: dict[str, str] | None = None) -> list[str]:
     text = html or ""
     hdr = " ".join(f"{k}: {v}" for k, v in (headers or {}).items())
     hay = text + " " + hdr
@@ -61,7 +61,7 @@ def _fallback_detect(html: str, headers: dict | None = None) -> list:
     return found
 
 
-def _wappalyzer_detect(url: str, html: str, headers: dict | None = None) -> list:
+def _wappalyzer_detect(url: str, html: str, headers: dict[str, str] | None = None) -> list[str]:
     try:
         from Wappalyzer import Wappalyzer, WebPage  # type: ignore
         analyzer = Wappalyzer.latest()
@@ -78,7 +78,7 @@ class TechDetector:
     def __init__(self, use_wappalyzer: bool = True):
         self._use_wappalyzer = use_wappalyzer
 
-    def detect(self, url: str, html: str, headers: dict | None = None) -> tuple:
+    def detect(self, url: str, html: str, headers: dict[str, str] | None = None) -> tuple[str, set[str]]:
         headers = headers or {}
         techs: list = []
         if self._use_wappalyzer:
@@ -87,42 +87,51 @@ class TechDetector:
             techs = _fallback_detect(html, headers)
         seen: set = set()
         ordered = []
-        for t in techs:
-            if t.lower() not in seen:
-                seen.add(t.lower())
-                ordered.append(t)
+        for raw_tech in techs:
+            tech = str(raw_tech).strip()
+            if tech and tech.lower() not in seen:
+                seen.add(tech.lower())
+                ordered.append(tech)
         return ", ".join(ordered), set(ordered)
 
     @staticmethod
-    def classify(tech_set: set) -> dict:
-        """Map a tech set to individual output columns (cms/analytics/etc.)."""
-        low = {t.lower() for t in tech_set}
+    def classify(tech_set: set[str]) -> dict[str, str]:
+        """Map detected technology names to only the fields they support.
 
-        def has(*names):
-            return any(n.lower() in low for n in names)
+        Missing detections are omitted rather than manufactured as ``N/A``;
+        the pipeline applies the output contract's missing-value policy.
+        """
+        low = {str(t).lower() for t in (tech_set or set())}
 
-        cms = ""
-        for candidate in ("WordPress", "Shopify", "Wix", "Squarespace", "Webflow",
-                          "Joomla", "Drupal", "Magento", "BigCommerce", "WooCommerce"):
+        def has(*names: str) -> bool:
+            return any(name.lower() in low for name in names)
+
+        classified: dict[str, str] = {}
+        for candidate in (
+            "WordPress", "Shopify", "Wix", "Squarespace", "Webflow", "Joomla",
+            "Drupal", "Magento", "BigCommerce", "WooCommerce",
+        ):
             if has(candidate):
-                cms = candidate
+                classified["cms"] = candidate
                 break
-        return {
-            "cms": cms or "N/A",
-            "analytics": "Google Analytics" if has("Google Analytics") else "N/A",
-            "tag_manager": "Google Tag Manager" if has("Google Tag Manager") else "N/A",
-            "meta_pixel": "detected" if has("Meta Pixel") else ("detected" if "facebook" in low else "N/A"),
-            "ga4": "N/A",
-            "gtm": "detected" if has("Google Tag Manager") else "N/A",
-            "ssl": has("Cloudflare") and "yes" if has("Cloudflare") else "N/A",
-        }
+        if has("Google Analytics", "Google Analytics 4"):
+            classified["analytics"] = "Google Analytics"
+        if has("Google Tag Manager"):
+            classified["tag_manager"] = "Google Tag Manager"
+            classified["gtm"] = "detected"
+        if has("Google Analytics 4", "GA4"):
+            classified["ga4"] = "detected"
+        if has("Meta Pixel"):
+            classified["meta_pixel"] = "detected"
+        return classified
 
 
 def detect_tech(html: str, scripts: list | None = None) -> dict:
     """Backward-compatible single-call detect over raw HTML + optional scripts.
 
-    Returns keys: cms, analytics, tag_manager, ga4, meta_pixel, gtm,
-    advertising, booking_system, chat_widget, ssl, tech_stack.
+    Returns detected keys from: cms, analytics, tag_manager, ga4, meta_pixel,
+    gtm, advertising, booking_system, chat_widget, ssl, tech_stack. Missing
+    detections are omitted so callers can apply their own missing-value policy.
     """
     detector = TechDetector(use_wappalyzer=False)
     tech_stack, _ = detector.detect("", html or "")
@@ -137,7 +146,7 @@ def detect_tech(html: str, scripts: list | None = None) -> dict:
         "Joomla": r"joomla",
         "Drupal": r"drupal",
         "Magento": r"magento",
-    }.items() if re.search(p, blob)), "N/A")
+    }.items() if re.search(p, blob)), None)
 
     gtm = bool(re.search(r"googletagmanager\.com/gtm\.js|GTM-[A-Z0-9]+", blob))
     ga4 = bool(re.search(r"gtag\(|G-[A-Z0-9]{6,}", blob))
@@ -152,15 +161,26 @@ def detect_tech(html: str, scripts: list | None = None) -> dict:
         "tawk.to", "intercom", "drift.com", "livechatinc.com", "zopim",
         "crisp.chat", "hubspot.com", "freshchat", "zendesk"])
 
-    return {
-        "cms": cms or "N/A",
-        "analytics": "Google Analytics" if "google-analytics" in blob or "gtag(" in blob else "N/A",
-        "tag_manager": "detected" if gtm else "N/A",
-        "ga4": "detected" if ga4 else "N/A",
-        "meta_pixel": "detected" if meta_pixel else "N/A",
-        "advertising": "yes" if advertising else "N/A",
-        "booking_system": "yes" if booking else "N/A",
-        "chat_widget": "yes" if chat else "N/A",
-        "ssl": "yes" if "https://" in (html or "")[:200] else "N/A",
-        "tech_stack": tech_stack or "N/A",
-    }
+    detected: dict[str, str] = {}
+    if cms:
+        detected["cms"] = cms
+    if "google-analytics" in blob or "gtag(" in blob:
+        detected["analytics"] = "Google Analytics"
+    if gtm:
+        detected["tag_manager"] = "detected"
+        detected["gtm"] = "detected"
+    if ga4:
+        detected["ga4"] = "detected"
+    if meta_pixel:
+        detected["meta_pixel"] = "detected"
+    if advertising:
+        detected["advertising"] = "yes"
+    if booking:
+        detected["booking_system"] = "yes"
+    if chat:
+        detected["chat_widget"] = "yes"
+    if "https://" in (html or "")[:200]:
+        detected["ssl"] = "yes"
+    if tech_stack:
+        detected["tech_stack"] = tech_stack
+    return detected

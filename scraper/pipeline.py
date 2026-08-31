@@ -6,9 +6,10 @@ filters, and appends surviving records to the atomic CSV before advancing the
 checkpoint. Rejected records roll back their dedup entries so a legitimate
 re-discovery is preserved.
 
-This version wires the FULL 85-column schema: Maps detail-panel fields come
-from the collector; website enrichment populates emails/social/tech/signals;
-MX/SMTP verification fills the verification columns; review analysis drives
+The pipeline maps a compact, producer-backed schema: Maps detail-panel fields
+come from the collector and pure Maps transformations; website enrichment
+populates emails/social/tech/signals/decision makers; MX/SMTP verification fills
+the verification columns; and review analysis drives
 sentiment/lead_score/pitch_hook (with an optional LLM personalized hook).
 """
 from __future__ import annotations
@@ -30,8 +31,10 @@ from .export.xlsx_writer import write_xlsx
 from .filters.engine import evaluate, split_filters
 from .maps.collector import MapsCollector
 from .maps.geo import geojson_polygons, point_in_any_polygon
+from .maps.transform import normalize_listing
 from .models import OUTPUT_COLUMNS
 from .signals.social import detect_social
+from .utils.normalize import normalize_text
 from .validation.quality import passes_quality
 from .websites.enricher import Enricher
 
@@ -94,6 +97,7 @@ class Pipeline:
             mx_checker=self.mx_checker,
             smtp_verifier=self.smtp_verifier,
             use_wappalyzer=config.website.use_wappalyzer,
+            decision_makers=config.enrichment.decision_makers,
         )
 
         # LLM personalized hook generator (optional, auto-detects API key).
@@ -114,7 +118,6 @@ class Pipeline:
 
     # -- collection ----------------------------------------------------------
     def run(self) -> dict:
-        total = len(self.cfg.queries)
         for idx, query in enumerate(self.cfg.queries, start=1):
             if self.checkpoint.is_query_done(query):
                 self._progress.note(f"skipped (already done): {query}")
@@ -144,13 +147,13 @@ class Pipeline:
         for raw in self.collector.collect(query):
             self.counters["collected"] += 1
             self._query_collected += 1
-            name = (raw or {}).get("business_name") or "—"
-            pos = (raw or {}).get("_position") or self._query_collected
-            total = (raw or {}).get("_total") or 0
-            self._progress.business_collected(pos, name, total)
             rec = self._normalize_record(raw, query, keyword)
             if not rec:
                 continue
+            name = rec.get("business_name") or "—"
+            pos = (raw or {}).get("_position") or self._query_collected
+            total = (raw or {}).get("_total") or 0
+            self._progress.business_collected(pos, name, total)
             self._process_record(rec, query)
 
     @staticmethod
@@ -160,23 +163,20 @@ class Pipeline:
         return m[0].strip() if len(m) == 2 else query
 
     def _normalize_record(self, raw: dict, query: str, keyword: str) -> dict | None:
-        rec = {col: "N/A" for col in OUTPUT_COLUMNS}
-        for k, v in raw.items():
-            if k in OUTPUT_COLUMNS:
-                rec[k] = v if v not in (None, "") else "N/A"
-        # Reviews are passed through for the analysis stage (not an output col).
-        if raw.get("_reviews"):
-            rec["_reviews"] = list(raw["_reviews"])
-        rec["source_query"] = query
-        rec["source_keyword"] = keyword
-        loc = re.split(r"\s+(?:in|near)\s+", query, maxsplit=1, flags=re.I)[-1] if re.search(r"\s+(?:in|near)\s+", query, re.I) else "N/A"
+        loc = (
+            re.split(r"\s+(?:in|near)\s+", query, maxsplit=1, flags=re.I)[-1]
+            if re.search(r"\s+(?:in|near)\s+", query, re.I)
+            else ""
+        )
+        rec = normalize_listing(
+            raw,
+            query=query,
+            keyword=keyword,
+            default_country=self.cfg.job.default_country,
+        )
         if rec.get("source_location") in (None, "N/A", ""):
-            rec["source_location"] = loc
-        # Defaults for rarely-present Maps fields.
-        for col in ("popular_times", "about", "competitors", "owner", "owner_posts",
-                    "can_claim", "is_spending_on_ads", "gas_prices",
-                    "featured_question", "reviews_per_rating"):
-            rec.setdefault(col, "N/A")
+            rec["source_location"] = normalize_text(loc)
+
         # Polygon filter.
         if self.polygons:
             try:
@@ -184,21 +184,23 @@ class Pipeline:
                 lng = float(rec.get("longitude"))
             except (TypeError, ValueError):
                 lat = lng = None
-            if lat is not None and not point_in_any_polygon(lat, lng, self.polygons):
+            if lat is not None and lng is not None and not point_in_any_polygon(
+                lat, lng, self.polygons
+            ):
                 return None
         return rec
 
     def _process_record(self, rec: dict, query: str) -> None:
         record_id = _make_record_id(rec)
         rec["record_id"] = record_id
-        is_dup, reason, sig = self.resolver.is_duplicate(rec)
+        is_dup, _, sig = self.resolver.is_duplicate(rec)
         if is_dup:
             self.counters["deduped"] += 1
             self._progress.business_dup()
             return
 
         # Pass 1: pre-enrichment filters.
-        keep, freason = evaluate(rec, self.pre_filters)
+        keep, _ = evaluate(rec, self.pre_filters)
         if not keep:
             self.resolver.rollback(rec)
             self.counters["filtered"] += 1
@@ -211,10 +213,6 @@ class Pipeline:
 
         # Review analysis (offline add-on; collector supplies review texts).
         self._analyze(rec)
-
-        # Post-enrichment: decision makers (optional).
-        if self.cfg.enrichment.decision_makers:
-            self._decision_makers(rec)
 
         # LLM personalized pitch hook (auto-falls back to rule-based).
         self._apply_llm_hook(rec)
@@ -250,8 +248,10 @@ class Pipeline:
         enr = self.enricher.enrich(website)
         rec["website_status"] = enr.website_status
         rec["website_failure_reason"] = enr.failure_reason or "N/A"
-        rec["emails"] = ",".join(enr.emails)
-        rec["email_count"] = str(len(enr.emails))
+        rec["emails"] = ",".join(enr.emails) if enr.emails else "N/A"
+        rec["email_count"] = len(enr.emails)
+        rec["decision_maker_name"] = enr.decision_maker_name or "N/A"
+        rec["decision_maker_title"] = enr.decision_maker_title or "N/A"
 
         # Social links (merge website-discovered with any Maps-discovered).
         merged_social = detect_social(
@@ -311,13 +311,6 @@ class Pipeline:
         hook = self.llm_hook.generate(rec)
         if hook:
             rec["pitch_hook"] = hook
-
-    def _decision_makers(self, rec: dict) -> None:
-        # Best-effort: already handled by enrich paths if a team page was found.
-        # Kept as an explicit, minimal no-op pass so the toggle is honored
-        # without a second crawl (decision-maker extraction is folded into the
-        # enricher's signal/detector stage when a suitable page is present).
-        return
 
     def _finalize(self) -> None:
         self.csv.close()

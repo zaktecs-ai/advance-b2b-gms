@@ -87,7 +87,7 @@ def run(config_path: str, demo: bool) -> int:
     pipeline = Pipeline(config, collector=collector, browser_manager=browser_manager,
                         progress=progress)
     try:
-        counters = pipeline.run()
+        pipeline.run()
     except KeyboardInterrupt:
         print("\ninterrupted — checkpoint state is durable; rerun to resume.",
               file=sys.stderr)

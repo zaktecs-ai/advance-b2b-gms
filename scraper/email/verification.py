@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import logging
 import smtplib
-import time
 
 from ..utils.dns_cache import DNSCache
-from ..utils.normalize import extract_domain
 
 try:
     import dns.resolver

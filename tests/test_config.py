@@ -1,7 +1,7 @@
 """Config validation: env resolution, ranges, queries required."""
 import pytest
 
-from scraper.config import load_config, ConfigError
+from scraper.config import ConfigError, load_config
 from scraper.maps.collector import DemoCollector
 
 
@@ -20,6 +20,17 @@ def test_minimal_config(tmp_path):
 
 def test_missing_queries(tmp_path):
     p = _write(tmp_path, "maps:\n  headless: true\n")
+    with pytest.raises(ConfigError):
+        load_config(p)
+
+
+def test_default_country_is_normalized(tmp_path):
+    p = _write(tmp_path, "queries: ['x']\njob:\n  default_country: pk\n")
+    assert load_config(p).job.default_country == "PK"
+
+
+def test_default_country_must_be_alpha2(tmp_path):
+    p = _write(tmp_path, "queries: ['x']\njob:\n  default_country: USA\n")
     with pytest.raises(ConfigError):
         load_config(p)
 

@@ -19,16 +19,15 @@ import random
 import re
 import time
 from typing import Iterator
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus
 
-from .parsing import (
-    parse_google_maps_url,
-    parse_rating_reviews,
-    decompose_address,
-    parse_popular_times,
-)
+from ..signals.social import detect_social
 from .reviews import extract_reviews_from_panel
-from ..utils.text import to_int, to_float
+from .transform import (
+    apply_url_identity,
+    extract_rating_reviews,
+    fallback_business_name,
+)
 
 log = logging.getLogger(__name__)
 
@@ -151,28 +150,6 @@ DESCRIPTION_SELECTORS = ['div[data-item-id="editorial_summary"]',
                          'div[class*="fontBodyMedium"]', 'div.PYvSYb']
 ABOUT_SELECTORS = ['div[data-item-id="about"]', 'button[jsaction*="about"]']
 
-_SOCIAL_HOSTS = {
-    "facebook": r"(^|\.)facebook\.com$",
-    "instagram": r"(^|\.)instagram\.com$",
-    "linkedin": r"(^|\.)linkedin\.com$",
-    "youtube": r"(^|\.)youtube\.com$|(^|\.)youtu\.be$",
-    "twitter_x": r"(^|\.)twitter\.com$|(^|\.)x\.com$",
-    "tiktok": r"(^|\.)tiktok\.com$",
-    "pinterest": r"(^|\.)pinterest\.com$",
-    "github": r"(^|\.)github\.com$",
-    "snapchat": r"(^|\.)snapchat\.com$",
-}
-
-
-def _platform_for_host(url: str) -> str | None:
-    try:
-        host = (urlparse(url).hostname or "").lower()
-    except ValueError:
-        return None
-    for platform, pattern in _SOCIAL_HOSTS.items():
-        if re.search(pattern, host):
-            return platform
-    return None
 
 
 def _first_text(page, selectors, timeout=2000):
@@ -225,18 +202,12 @@ def _extract_hours(page) -> str:
 
 
 def _extract_social_links(page) -> dict:
-    result = {k: "N/A" for k in _SOCIAL_HOSTS}
+    """Read anchor hrefs from the live panel; classify them in pure code."""
     try:
         hrefs = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
     except Exception:
         hrefs = []
-    for href in hrefs:
-        if not href:
-            continue
-        p = _platform_for_host(href)
-        if p and result[p] == "N/A":
-            result[p] = href
-    return result
+    return detect_social([href for href in hrefs if href])
 
 
 def _extract_phone_international(page) -> str:
@@ -252,7 +223,11 @@ def _extract_phone_international(page) -> str:
 
 
 class MapsCollector:
-    """Streams normalized business dicts from Google Maps for one query."""
+    """Stream raw browser-extracted listing dicts for one Maps query.
+
+    Deterministic normalization and schema projection happen in
+    ``scraper.maps.transform`` rather than in this Playwright adapter.
+    """
 
     def __init__(self, browser_manager, *, max_results_per_query: int = 0,
                  max_total_results: int = 0, include_permanently_closed: bool = False,
@@ -331,8 +306,7 @@ class MapsCollector:
                 data = self._open_and_extract(page, place_url, position=pos,
                                               total=len(listing_links))
                 if not data.get("business_name"):
-                    parsed = parse_google_maps_url(place_url)
-                    data["business_name"] = parsed.get("place_name") or "N/A"
+                    data["business_name"] = fallback_business_name(place_url)
                 data["source_query"] = query
                 status = (data.get("business_status") or "").lower()
                 if ("permanently closed" in status) and not self._include_closed:
@@ -383,7 +357,6 @@ class MapsCollector:
             _first_attr(page, WEBSITE_SELECTORS[1], "href") or "N/A"
 
         data["plus_code"] = _first_text(page, PLUS_CODE_SELECTORS) or "N/A"
-        data["timezone"] = "N/A"
 
         data["rating"], data["review_count"] = self._extract_rating_reviews(page)
 
@@ -404,15 +377,8 @@ class MapsCollector:
 
         data.update(_extract_social_links(page))
 
-        parsed = parse_google_maps_url(page.url)
-        for key, col in (("lat", "latitude"), ("lng", "longitude"),
-                         ("place_id", "place_id"), ("cid", "cid"), ("kgmid", "kgmid")):
-            if parsed.get(key):
-                data[col] = parsed[key]
         data["google_maps_url"] = page.url
-
-        data.update(decompose_address(data.get("full_address") or ""))
-
+        apply_url_identity(data, page.url)
         return data
 
     def _click_to_open(self, page, place_url: str) -> bool:
@@ -435,10 +401,9 @@ class MapsCollector:
             try:
                 loc = page.locator(sel).first
                 if loc.count() > 0:
-                    rating, count = parse_rating_reviews(loc.inner_text(timeout=2000))
-                    if rating is not None or count is not None:
-                        return (rating if rating is not None else "N/A",
-                                count if count is not None else "N/A")
+                    rating, count = extract_rating_reviews(loc.inner_text(timeout=2000))
+                    if rating != "N/A" or count != "N/A":
+                        return rating, count
             except Exception:
                 continue
         for sel in REVIEW_COUNT_SELECTORS:
@@ -446,19 +411,16 @@ class MapsCollector:
                 loc = page.locator(sel).first
                 if loc.count() > 0:
                     aria = loc.get_attribute("aria-label", timeout=2000) or ""
-                    rating, count = parse_rating_reviews(aria)
-                    if rating is not None or count is not None:
-                        return (rating if rating is not None else "N/A",
-                                count if count is not None else "N/A")
+                    rating, count = extract_rating_reviews(aria)
+                    if rating != "N/A" or count != "N/A":
+                        return rating, count
             except Exception:
                 continue
         try:
             header = page.locator('div[role="main"]').inner_text(timeout=2000)
         except Exception:
             header = ""
-        rating, count = parse_rating_reviews(header or "")
-        return (rating if rating is not None else "N/A",
-                count if count is not None else "N/A")
+        return extract_rating_reviews(header or "")
 
     def _claimed_status(self, page) -> str:
         try:

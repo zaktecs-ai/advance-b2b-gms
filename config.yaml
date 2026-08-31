@@ -65,7 +65,7 @@ enrichment:
   emails: true
   social: true
   tech_detect: true
-  decision_makers: false       # extra pass (off by default)
+  decision_makers: false       # extract from fetched about/team pages (off by default)
   mx_verify: false             # Native MX via dnspython (off by default)
   smtp_verify: false           # Native SMTP via smtplib (off by default)
   require_website: false

@@ -3,7 +3,8 @@
 Locks the fixes that keep meta_pixel/ga4/gtm/advertising/booking/chat from
 coming out blank, and verifies the SignalDetector's YES/NO output shape.
 """
-from scraper.signals.detector import SignalDetector, PageContext, TECH_FIELDS
+from scraper.signals.detector import TECH_FIELDS, PageContext, SignalDetector
+from scraper.websites.tech_detect import TechDetector
 
 
 def _ctx(html="", text="", urls=None, scripts=None):
@@ -45,11 +46,18 @@ def test_booking_and_chat_detected():
 
 def test_all_bool_fields_present():
     # Every boolean tech field must always be present with YES or NO (never
-    # absent), so the 85-column schema never shows a blank cell for these.
+    # absent), so the export contract never shows a blank cell for these.
     out, _ = SignalDetector().run(_ctx(html=""))
     for f in TECH_FIELDS:
         assert f in out, f"missing field {f}"
         assert out[f] in ("YES", "NO")
+
+
+def test_tech_classify_does_not_fabricate_missing_fields():
+    assert TechDetector.classify(set()) == {}
+    assert TechDetector.classify({"Google Analytics"}) == {"analytics": "Google Analytics"}
+    assert "ga4" not in TechDetector.classify({"Google Analytics"})
+    assert TechDetector.classify({"Google Analytics 4"})["ga4"] == "detected"
 
 
 def test_blank_page_all_no():

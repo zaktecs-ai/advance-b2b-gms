@@ -1,8 +1,20 @@
 """Normalization tests (URLs, phones, emails, domains, IPv6)."""
 from scraper.utils.normalize import (
-    normalize_url, extract_domain, canonical_domain, normalize_phone,
-    normalize_email, is_usable_email, is_personal_provider,
+    canonical_domain,
+    extract_domain,
+    is_personal_provider,
+    is_usable_email,
+    normalize_email,
+    normalize_phone,
+    normalize_text,
+    normalize_url,
 )
+
+
+def test_normalize_text_repairs_mojibake_entities_and_markup():
+    assert normalize_text("FranÃ§ais &amp; <b>café</b>" + chr(0x200b) + chr(0)) == "Français & café"
+    assert normalize_text("مرحبا" + chr(0x202e) + " بالعالم") == "مرحبا بالعالم"
+    assert normalize_text(bytes([0x43, 0x72, 0xc3, 0xa8, 0x6d, 0x65])) == "Crème"
 
 
 def test_normalize_url_basic():
@@ -46,9 +58,12 @@ def test_canonical_domain_ip():
 
 
 def test_normalize_phone():
-    assert normalize_phone("+1 (555) 000-1234") == "15550001234"
-    assert normalize_phone("555-000-1234") == "15550001234"
+    assert normalize_phone("+1 (555) 000-1234") == "+15550001234"
+    assert normalize_phone("555-000-1234") == "+15550001234"
+    assert normalize_phone("020 7183 8750", default_country="GB") == "+442071838750"
+    assert normalize_phone("0044 20 7183 8750") == "+442071838750"
     assert normalize_phone("N/A") == "N/A"
+    assert normalize_phone("not a phone") == "N/A"
 
 
 def test_normalize_email():

@@ -25,7 +25,7 @@ config.yaml ──► load_config() ──► AppConfig (pydantic-validated)
                                         │                  │   detail-panel
                                         │                  │   deep extraction)
                                         ▼
-   normalize → dedup → pre-filter → Enricher (fetch → crawl → emails/social/tech/signals)
+   normalize_listing → dedup → pre-filter → Enricher (fetch → crawl → emails/social/tech/signals/decision-maker)
                                         │
                                         ▼
               MX/SMTP verify → analysis (sentiment/lead-score/hook)
@@ -37,8 +37,9 @@ config.yaml ──► load_config() ──► AppConfig (pydantic-validated)
 
 ## The collector (the fix)
 
-The original collector only did `page.goto(href)` and read ~12 fields, leaving
-52 of 85 columns empty. The current `MapsCollector`:
+The collector owns browser interaction and raw field reads; deterministic
+normalization is delegated to `scraper/maps/transform.py`. The current
+`MapsCollector`:
 
 1. Navigates to the search URL (`hl`/`gl`/region forced).
 2. Dismisses the EU consent wall if present.
@@ -47,7 +48,7 @@ The original collector only did `page.goto(href)` and read ~12 fields, leaving
 5. For each listing, **clicks the card in-place** (SPA flow) and waits for the
    detail panel to hydrate (`h1` present), then extracts each field through
    PRIMARY → ALTERNATE → regex fallback selectors:
-   - name, category, address (decomposed → city/state/zip/country)
+   - name, category, address (raw; decomposed by the pure transform boundary)
    - phone (+ international), website, plus code
    - rating, review count (rating block → aria → regex fallback)
    - hours (table `eK4R0e` buttons), status, claimed status, description
@@ -64,6 +65,16 @@ of relevant internal pages (contact/about/services), then:
 - detects social profiles (domain-anchored, per-platform)
 - detects tech stack (Wappalyzer preferred, regex fallback)
 - runs signal detectors (GA4/GTM/Meta Pixel/booking/chat + business keywords)
+- optionally extracts a decision-maker name/title from the fetched about/team context
+
+## Output contract
+
+`models.OUTPUT_COLUMNS` is the single source of truth for CSV, XLSX, and
+checkpoint export. It contains 75 producer-backed fields; unsupported Maps
+surfaces such as popular times, competitors, ownership posts, ad-spend flags,
+gas prices, featured questions, rating buckets, and timezone are intentionally
+not represented. Every missing value is applied at the transformation/export
+boundary, never by a fake producer inside the collector or detector.
 
 ## Email verification (native, no paid APIs)
 

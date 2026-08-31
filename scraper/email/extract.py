@@ -16,11 +16,7 @@ import re
 
 from bs4 import BeautifulSoup
 
-from ..utils.normalize import (
-    normalize_email,
-    is_usable_email,
-    email_rejection_reason,
-)
+from ..utils.normalize import is_usable_email, normalize_email
 
 _EMAIL_TOKEN_RE = re.compile(
     r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"

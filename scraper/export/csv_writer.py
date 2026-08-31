@@ -46,14 +46,18 @@ class AtomicCSVWriter:
             if not rows:
                 return
             if rows[0] != [str(c) for c in self.columns]:
-                log.warning("CSV header mismatch; not rewriting.")
-                return
+                raise ValueError(
+                    "CSV header does not match the active output schema; "
+                    "choose a new output path instead of mixing schemas"
+                )
             expected = len(self.columns)
             if rows and len(rows[-1]) != expected:
                 log.warning("trimming malformed trailing row (%d vs %d fields)",
                             len(rows[-1]), expected)
                 with open(self.path, "w", encoding="utf-8", newline="") as fh:
                     csv.writer(fh).writerows(rows[:-1])
+        except ValueError:
+            raise
         except Exception as e:  # noqa: BLE001
             log.warning("CSV recovery failed (will append): %s", e)
 

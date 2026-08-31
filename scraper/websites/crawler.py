@@ -7,7 +7,6 @@ Optional sitemap.xml-aware discovery of relevant pages.
 from __future__ import annotations
 
 import logging
-import re
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup

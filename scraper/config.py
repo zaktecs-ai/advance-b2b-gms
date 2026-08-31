@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -37,6 +37,14 @@ class JobConfig(BaseModel):
     default_country: str = "US"
     max_results_per_query: int = Field(default=0, ge=0)
     max_total_results: int = Field(default=0, ge=0)
+
+    @field_validator("default_country")
+    @classmethod
+    def _validate_default_country(cls, value: str) -> str:
+        code = value.strip().upper()
+        if not re.fullmatch(r"[A-Z]{2}", code):
+            raise ValueError("default_country must be an ISO alpha-2 country code")
+        return code
 
 
 class MapsConfig(BaseModel):

@@ -1,9 +1,6 @@
 """Checkpoint store: register/commit, in-flight-not-dup, CSV recovery."""
-import json
-
 from scraper.checkpoint.store import CheckpointStore
 from scraper.export.csv_writer import AtomicCSVWriter
-from scraper.models import OUTPUT_COLUMNS
 
 
 def _sig(kgmid="/g/1"):
@@ -69,6 +66,14 @@ def test_csv_recovery_trims_trailing(tmp_path):
     w = AtomicCSVWriter(p, cols)
     assert w.row_count == 1  # only the complete row survives
     w.close()
+
+
+def test_csv_schema_mismatch_fails_closed(tmp_path):
+    p = tmp_path / "leads.csv"
+    p.write_text("old_header\nold_value\n", encoding="utf-8")
+    import pytest
+    with pytest.raises(ValueError, match="active output schema"):
+        AtomicCSVWriter(p, ["new_header"])
 
 
 def test_atomic_csv_append(tmp_path):

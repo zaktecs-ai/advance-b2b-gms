@@ -4,7 +4,7 @@ A clean-room, production-grade Google Maps B2B lead-generation engine. It
 scrapes business listings from Google Maps, enriches each one with deep website
 intelligence (emails, social profiles, tech stack, lead signals), verifies
 emails natively (MX/SMTP), and scores every lead — outputting a fully-populated
-**85-column** XLSX.
+**75-column** XLSX/CSV contract.
 
 ## Highlights
 
@@ -18,6 +18,9 @@ emails natively (MX/SMTP), and scores every lead — outputting a fully-populate
   (GA4/GTM/Meta Pixel/booking/chat/pricing/financing/…).
 - **Native email verification** — MX via `dnspython` and SMTP via `smtplib`,
   no paid external APIs.
+- **Data-quality boundary** — `ftfy` repairs mojibake without dropping valid
+  scripts, while `phonenumbers` formats possible global numbers as E.164 and
+  conservative address parsing avoids false city/state assignments.
 - **Lead scoring + hooks** — sentiment score, review keywords, 0–100 lead
   score, and a pitch hook (rule-based, with an *optional* AI personalized hook).
 - **Pure CLI / background execution** — no web UI. Driven entirely by
@@ -47,6 +50,7 @@ Everything lives in **`config.yaml`** (the single control point) and **`.env`**
 | `maps.headless` / `vnc.display` | Headed VNC browser for CAPTCHA solving |
 | `website.max_pages_per_site` | Bounded crawl depth per business site |
 | `enrichment.mx_verify` / `smtp_verify` | Native email verification toggles |
+| `enrichment.decision_makers` | Optional about/team-page name and title extraction |
 | `ai_hook.*` | Optional AI personalized pitch hook (see below) |
 | `filters` | Keep/reject rules (two-pass: Maps fields, then website fields) |
 
@@ -110,8 +114,8 @@ so the terminal never floods. To suppress progress lines entirely, set
 
 ## Output schema
 
-85 columns across: identity (kgmid/place_id/cid/name/category), contact
-(phone/web/address/coords/plus-code/timezone), maps intelligence
+75 columns across: identity (kgmid/place_id/cid/name/category), contact
+(phone/web/address/coords/plus-code), maps intelligence
 (rating/reviews/hours/description/claimed/status), provenance, website
 intelligence (status/emails/social/tech/signals), scoring
 (sentiment/keywords/lead-score/pitch-hook/top-review), decision-maker, and

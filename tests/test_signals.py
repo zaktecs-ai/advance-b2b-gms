@@ -1,6 +1,6 @@
 """Signal detection: social classification + business signals + decision maker."""
-from scraper.signals.social import platform_for_url, detect_social
 from scraper.signals.detector import PageContext, detect_signals, extract_decision_maker
+from scraper.signals.social import detect_social, platform_for_url
 
 
 def test_platform_facebook():
@@ -48,6 +48,11 @@ def test_extract_decision_maker():
     name, title = extract_decision_maker("John Smith, CEO of Acme Plumbing")
     assert name == "John Smith"
     assert title == "CEO"
+
+
+def test_extract_decision_maker_variants_and_unicode():
+    assert extract_decision_maker("Founder: Maria García") == ("Maria García", "Founder")
+    assert extract_decision_maker("CEO John Smith") == ("John Smith", "CEO")
 
 
 def test_extract_decision_maker_none():
