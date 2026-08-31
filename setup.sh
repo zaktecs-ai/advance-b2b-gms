@@ -29,5 +29,5 @@ python -m playwright install --with-deps chromium
 
 echo ""
 echo "Setup complete. Try it:"
-echo "  source .venv/bin/activate"
-echo "  PYTHONPATH=src python -m scraper.main --config config.yaml --demo"
+echo "  ./run.sh --demo          # offline test (no browser needed)"
+echo "  ./run.sh                 # live scrape"

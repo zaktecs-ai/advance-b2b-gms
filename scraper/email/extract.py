@@ -1,0 +1,104 @@
+"""Email extraction and static cleaning.
+
+Extraction sources (priority order, per page):
+  1. mailto: links
+  2. JSON-LD / microdata structured data
+  3. inline <script> blocks (obfuscated addresses)
+  4. visible HTML text
+  5. rendered DOM text (supplied by the Playwright path)
+
+Cleaning decodes obfuscation (``[at]``, ``[dot]``, ``&#64;``) and rejects
+disposable/placeholder/asset junk, with domain-relationship filtering.
+"""
+from __future__ import annotations
+
+import re
+
+from bs4 import BeautifulSoup
+
+from ..utils.normalize import (
+    normalize_email,
+    is_usable_email,
+    email_rejection_reason,
+)
+
+_EMAIL_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?\.[A-Za-z]{2,63}",
+)
+
+
+def _decode_obfuscated(text: str) -> str:
+    t = text
+    t = t.replace("&#64;", "@").replace("&commat;", "@").replace("@&#8203;", "@")
+    t = t.replace("&#46;", ".").replace("&#x2E;", ".").replace("&period;", ".")
+    t = re.sub(r"\s*\[at\]\s*", "@", t, flags=re.I)
+    t = re.sub(r"\s*\(at\)\s*", "@", t, flags=re.I)
+    t = re.sub(r"\s*\[dot\]\s*", ".", t, flags=re.I)
+    t = re.sub(r"\s*\(dot\)\s*", ".", t, flags=re.I)
+    t = re.sub(r"\s+at\s+", "@", t, flags=re.I)
+    t = re.sub(r"\s+dot\s+", ".", t, flags=re.I)
+    return t
+
+
+def extract_emails_from_text(text: str) -> list[str]:
+    """Extract unique normalized emails from arbitrary text."""
+    if not text:
+        return []
+    decoded = _decode_obfuscated(text)
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _EMAIL_TOKEN_RE.finditer(decoded):
+        candidate = normalize_email(m.group(0))
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            found.append(candidate)
+    return found
+
+
+def extract_emails(html: str | None, rendered_text: str = "", url: str = "") -> list[str]:
+    """Extract raw emails from an HTML page (and optional rendered DOM text)."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(emails) -> None:
+        for e in emails:
+            ne = normalize_email(e)
+            if ne and ne not in seen:
+                seen.add(ne)
+                candidates.append(ne)
+
+    if html:
+        soup = BeautifulSoup(html, "lxml")
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "")
+            if href.lower().startswith("mailto:"):
+                add([href[7:].split("?")[0]])
+        for script in soup.find_all("script", type="application/ld+json"):
+            add(extract_emails_from_text(script.get_text()))
+        for script in soup.find_all("script"):
+            if not script.get("src"):
+                add(extract_emails_from_text(script.get_text()))
+        add(extract_emails_from_text(soup.get_text(" ")))
+        for m in re.finditer(r"mailto:([^\"'>\s]+)", html, re.I):
+            add([m.group(1).split("?")[0]])
+
+    if rendered_text:
+        add(extract_emails_from_text(rendered_text))
+
+    return candidates
+
+
+def clean_emails(candidates: list[str], max_length: int = 120,
+                 website_url: str | None = None) -> list[str]:
+    """Apply static cleaning; returns only usable emails, ordered."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in candidates:
+        e = normalize_email(c)
+        if not e or e in seen:
+            continue
+        seen.add(e)
+        if is_usable_email(e, max_length, website_url):
+            out.append(e)
+    return out

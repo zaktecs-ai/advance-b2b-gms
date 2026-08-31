@@ -51,7 +51,7 @@ python -m playwright install chromium
 ### Demo mode (offline, no browser — proves the add-on)
 
 ```bash
-PYTHONPATH=src python -m scraper.main --config config.yaml --demo
+python -m scraper.main --config config.yaml --demo
 ```
 
 Output lands in `output/<client_name>/leads.csv` (plus `leads.xlsx`).
@@ -61,13 +61,13 @@ Output lands in `output/<client_name>/leads.csv` (plus `leads.xlsx`).
 Edit `config.yaml` to set your `queries`, then:
 
 ```bash
-PYTHONPATH=src python -m scraper.main --config config.yaml
+python -m scraper.main --config config.yaml
 ```
 
 ### REST API + Web UI
 
 ```bash
-PYTHONPATH=src python -m scraper.main --config config.yaml --serve
+python -m scraper.main --config config.yaml --serve
 # Open http://localhost:8000  (auto OpenAPI docs at /docs)
 ```
 
@@ -115,7 +115,7 @@ fully covered by headless unit tests.
 ## Project layout
 
 ```
-src/scraper/
+scraper/
 ├── main.py          # CLI + --serve entrypoints
 ├── config.py        # pydantic config + validation
 ├── models.py        # output schema + website-status taxonomy

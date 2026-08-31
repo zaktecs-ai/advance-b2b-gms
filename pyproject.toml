@@ -12,7 +12,7 @@ requires-python = ">=3.9"
 abgms = "scraper.main:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["scraper*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

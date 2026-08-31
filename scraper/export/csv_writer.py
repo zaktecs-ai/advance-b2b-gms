@@ -1,0 +1,92 @@
+"""Append-safe CSV writer with atomic row commits and crash recovery.
+
+Each row is flushed + fsync'd before the checkpoint advances, so a crash never
+loses a committed row nor leaves a malformed trailing partial row. On open, the
+writer trims any malformed trailing line back to the last complete row.
+"""
+from __future__ import annotations
+
+import csv
+import logging
+import os
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+
+class AtomicCSVWriter:
+    def __init__(self, path: str | Path, columns: list[str]):
+        self.path = Path(path)
+        self.columns = columns
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = None
+        self._writer = None
+        self._row_count = 0
+        self._open()
+
+    def _open(self) -> None:
+        is_new = not self.path.exists() or self.path.stat().st_size == 0
+        if is_new:
+            self._fh = open(self.path, "w", encoding="utf-8", newline="")
+            self._writer = csv.DictWriter(self._fh, fieldnames=self.columns)
+            self._writer.writeheader()
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+            self._row_count = 0
+        else:
+            self._recover()
+            self._fh = open(self.path, "a", encoding="utf-8", newline="")
+            self._writer = csv.DictWriter(self._fh, fieldnames=self.columns)
+            self._row_count = self._count_rows()
+
+    def _recover(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8", newline="") as fh:
+                rows = list(csv.reader(fh))
+            if not rows:
+                return
+            if rows[0] != [str(c) for c in self.columns]:
+                log.warning("CSV header mismatch; not rewriting.")
+                return
+            expected = len(self.columns)
+            if rows and len(rows[-1]) != expected:
+                log.warning("trimming malformed trailing row (%d vs %d fields)",
+                            len(rows[-1]), expected)
+                with open(self.path, "w", encoding="utf-8", newline="") as fh:
+                    csv.writer(fh).writerows(rows[:-1])
+        except Exception as e:  # noqa: BLE001
+            log.warning("CSV recovery failed (will append): %s", e)
+
+    def _count_rows(self) -> int:
+        try:
+            with open(self.path, "r", encoding="utf-8", newline="") as fh:
+                return max(0, sum(1 for _ in fh) - 1)
+        except Exception:
+            return 0
+
+    def append(self, row: dict) -> int:
+        ordered = {c: row.get(c, "") for c in self.columns}
+        for k in list(ordered):
+            v = ordered[k]
+            if v is None:
+                ordered[k] = ""
+            elif not isinstance(v, str):
+                ordered[k] = str(v)
+        self._writer.writerow(ordered)
+        self._fh.flush()
+        os.fsync(self._fh.fileno())
+        self._row_count += 1
+        return self._row_count - 1
+
+    @property
+    def row_count(self) -> int:
+        return self._row_count
+
+    def close(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.flush()
+                os.fsync(self._fh.fileno())
+            finally:
+                self._fh.close()
+                self._fh = None
