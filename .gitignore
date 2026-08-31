@@ -4,14 +4,21 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+build/
+dist/
 
-# Runtime output
+# Runtime
 output/
-leads.csv
-leads.xlsx
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.json.bak
+.env
 
-# Editor / OS
+# Playwright
+.playwright/
+
+# OS / editor
 .DS_Store
 .idea/
 .vscode/
-*.log

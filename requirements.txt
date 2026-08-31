@@ -1,8 +1,17 @@
-# Runtime deps for the standalone B2B lead scraper.
-# Demo mode + analysis + CSV/JSON export need only the first two.
-PyYAML>=6.0          # config.yaml parsing
-pytest>=7.0          # running the test suite
-# Optional (used only if installing the one-line scaler tooling target):
-#   botasaurus-api is NOT used here; the core is dependency-light on purpose.
-# To enable xlsx output, uncomment:
-# openpyxl>=3.1
+# Advance B2B GMS — runtime dependencies.
+# Python 3.9+ (compatible up to 3.12).
+
+playwright>=1.40
+httpx>=0.25
+beautifulsoup4>=4.12
+lxml>=4.9
+PyYAML>=6.0
+python-dotenv>=1.0
+dnspython>=2.4
+openpyxl>=3.1
+pydantic>=2.5
+fastapi>=0.104
+uvicorn>=0.24
+
+# -- testing --
+pytest>=7.4

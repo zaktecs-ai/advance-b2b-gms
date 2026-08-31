@@ -1,135 +1,175 @@
-"""Configuration loading + validation for the standalone scraper.
+"""Configuration loading, env interpolation, and validation.
 
-One human-editable YAML file drives a job. Every risky knob is range-checked with
-a clear message, so a bad value aborts cleanly instead of crashing the run.
+One human-editable YAML file drives the engine. Secrets live in ``.env`` and
+are referenced as ``${VAR}``. Validation runs *before* any scraping; invalid
+values produce a clear error naming the key, the bad value, the allowed range,
+and a recommendation for the target VPS.
+
+``pydantic`` enforces types/ranges so mistakes fail fast rather than silently
+misbehaving mid-run.
 """
 from __future__ import annotations
 
+import os
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-try:
-    import yaml
-except ImportError:  # pragma: no cover - fails fast if deps missing
-    yaml = None  # type: ignore[assignment]
+import yaml
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-
-class ConfigError(Exception):
-    """Raised when the config file is missing, malformed, or out of range."""
+ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-@dataclass
-class Config:
+class ConfigError(ValueError):
+    """User-facing configuration error."""
+
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
+
+class JobConfig(BaseModel):
     client_name: str = "campaign"
-    output_dir: Path = Path("output")
-    queries: list[str] = field(default_factory=list)
+    output_dir: str = "output"
+    default_country: str = "US"
+
+
+class MapsConfig(BaseModel):
     headless: bool = True
     hl: str = "en"
     gl: str = "us"
-    max_results_per_query: int = 0
-    max_total_results: int = 0
-    # the free add-on feature knobs (all off-by-default safe)
-    reviews_enabled: bool = True
-    reviews_per_business: int = 5
-    min_review_len: int = 20
-    max_review_len: int = 600
-    # enrichment
-    enrich_emails: bool = True
+    zoom: int = Field(default=16, ge=0, le=21)
+    max_results_per_query: int = Field(default=0, ge=0)
+    max_total_results: int = Field(default=0, ge=0)
+    scroll_pause_seconds: float = Field(default=2.0, ge=0.1, le=30.0)
+    max_scrolls: int = Field(default=0, ge=0)  # 0 = scroll until no new results
+
+
+class ReviewsConfig(BaseModel):
+    enabled: bool = True
+    per_business: int = Field(default=5, ge=1, le=50)
+    min_len: int = Field(default=0, ge=0)
+    max_len: int = Field(default=1000, ge=10)
+
+
+class EnrichmentConfig(BaseModel):
+    emails: bool = True
+    social: bool = True
+    tech_detect: bool = True
+    decision_makers: bool = False  # off by default (extra pass)
+    mx_verify: bool = False        # off by default
+    smtp_verify: bool = False      # off by default
     require_website: bool = False
-    # runtime
-    website_workers: int = 4
-    playwright_workers: int = 2
 
-    _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-    def resolve(self) -> "Config":
-        self.output_dir = self.output_dir / self.client_name
+class RuntimeConfig(BaseModel):
+    website_workers: int = Field(default=4, ge=1, le=64)
+    playwright_workers: int = Field(default=2, ge=1, le=16)
+    request_timeout: float = Field(default=20.0, ge=1.0, le=120.0)
+    idle_exit_seconds: int = Field(default=0, ge=0)
+    pacing: float = Field(default=1.0, ge=0.0, le=30.0)  # request pacing clock
+
+
+class GridConfig(BaseModel):
+    enabled: bool = False
+    cell_size_km: float = Field(default=3.0, ge=0.1, le=50.0)
+
+
+class GeoConfig(BaseModel):
+    polygons: list[Any] = Field(default_factory=list)
+
+
+class ProxyConfig(BaseModel):
+    enabled: bool = False
+    urls: list[str] = Field(default_factory=list)
+    file: str = ""
+    rotation: Literal["round_robin", "random"] = "round_robin"
+
+
+class AnalysisConfig(BaseModel):
+    enabled: bool = True
+    lexicon_hint: str = ""  # optional path to a custom sentiment lexicon
+
+
+class FilterConfig(BaseModel):
+    include_all: list[Any] = Field(default_factory=list)
+    include_any: list[Any] = Field(default_factory=list)
+    exclude_all: list[Any] = Field(default_factory=list)
+    exclude_any: list[Any] = Field(default_factory=list)
+
+
+class AppConfig(BaseModel):
+    job: JobConfig = Field(default_factory=JobConfig)
+    queries: list[str] = Field(default_factory=list)
+    maps: MapsConfig = Field(default_factory=MapsConfig)
+    reviews: ReviewsConfig = Field(default_factory=ReviewsConfig)
+    enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    grid: GridConfig = Field(default_factory=GridConfig)
+    geo: GeoConfig = Field(default_factory=GeoConfig)
+    proxy: ProxyConfig = Field(default_factory=ProxyConfig)
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+    filters: FilterConfig = Field(default_factory=FilterConfig)
+
+    @model_validator(mode="after")
+    def _check_queries(self):
+        if not self.queries:
+            raise ValueError("config must define at least one query under `queries:`")
         return self
 
-    @classmethod
-    def from_file(cls, path: str | Path) -> "Config":
-        if yaml is None:  # pragma: no cover
-            raise ConfigError("PyYAML is required: pip install PyYAML")
-        p = Path(path)
-        if not p.exists():
-            raise ConfigError(f"Config file not found: {p}")
-        try:
-            data = yaml.safe_load(p.read_text()) or {}
-        except yaml.YAMLError as e:  # type: ignore[union-attr]
-            raise ConfigError(f"Invalid YAML in {p}: {e}") from e
-        return cls.from_dict(data)
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Config":
-        cfg = cls()
-        job = data.get("job", {}) or {}
-        maps = data.get("maps", {}) or {}
-        enr = data.get("enrichment", {}) or {}
-        reviews = data.get("reviews", {}) or {}
-        run = data.get("runtime", {}) or {}
+# ---------------------------------------------------------------------------
+# Env resolution + loader
+# ---------------------------------------------------------------------------
 
-        # job
-        if isinstance(job.get("client_name"), str) and job["client_name"].strip():
-            cfg.client_name = job["client_name"].strip()
-        else:
-            raise ConfigError("'job.client_name' must be a non-empty string")
-        if not cls._NAME_RE.match(cfg.client_name):
-            raise ConfigError(
-                f"'job.client_name' '{cfg.client_name}' must match {cls._NAME_RE.pattern}"
-            )
-        if "output_dir" in job and isinstance(job["output_dir"], str):
-            cfg.output_dir = Path(str(job["output_dir"]))
-        cfg.queries = _strlist(data.get("queries"))
-        if not cfg.queries:
-            raise ConfigError("'queries' must contain at least one search string")
+class _EnvResolver:
+    def __init__(self) -> None:
+        self._missing: list[str] = []
 
-        # maps
-        if isinstance(maps.get("headless"), bool):
-            cfg.headless = maps["headless"]
-        cfg.hl = _opt_str(maps.get("hl"), "en")
-        cfg.gl = _opt_str(maps.get("gl"), "us")
-        cfg.max_results_per_query = _int_in(maps, "max_results_per_query", 0, 100_000, 0)
-        cfg.max_total_results = _int_in(maps, "max_total_results", 0, 1_000_000, 0)
-
-        # enrichment
-        if isinstance(enr.get("emails"), bool):
-            cfg.enrich_emails = enr["emails"]
-        if isinstance(enr.get("require_website"), bool):
-            cfg.require_website = enr["require_website"]
-
-        # reviews (free add-on)
-        if isinstance(reviews.get("enabled"), bool):
-            cfg.reviews_enabled = reviews["enabled"]
-        cfg.reviews_per_business = _int_in(reviews, "per_business", 1, 50, 5)
-        cfg.min_review_len = _int_in(reviews, "min_len", 5, 200, 20)
-        cfg.max_review_len = _int_in(reviews, "max_len", 50, 4000, 600)
-
-        # runtime
-        cfg.website_workers = _int_in(run, "website_workers", 1, 12, 4)
-        cfg.playwright_workers = _int_in(run, "playwright_workers", 1, 8, 2)
-        return cfg.resolve()
+    def resolve(self, value):
+        if isinstance(value, str):
+            def _sub(m):
+                name = m.group(1)
+                val = os.environ.get(name)
+                if val is None:
+                    self._missing.append(name)
+                    return m.group(0)
+                return val
+            return ENV_VAR_RE.sub(_sub, value)
+        if isinstance(value, list):
+            return [self.resolve(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self.resolve(v) for k, v in value.items()}
+        return value
 
 
-def _strlist(value: Any) -> list[str]:
-    if not value:
-        return []
-    return [str(x).strip() for x in value if str(x).strip()]
-
-
-def _opt_str(value: Any, default: str) -> str:
-    return str(value).strip() if isinstance(value, str) and value.strip() else default
-
-
-def _int_in(section: dict[str, Any], key: str, lo: int, hi: int, default: int) -> int:
-    raw = section.get(key)
-    if raw is None:
-        return default
+def load_config(path: str | Path = "config.yaml") -> AppConfig:
+    """Load, env-resolve, and validate config; returns an AppConfig."""
+    path = Path(path)
+    if not path.exists():
+        raise ConfigError(f"Config file not found: {path}.")
     try:
-        val = int(raw)
-    except (TypeError, ValueError):
-        raise ConfigError(f"'{key}' must be an integer, got {raw!r}") from None
-    if not (lo <= val <= hi):
-        raise ConfigError(f"'{key}'={val} out of range [{lo}, {hi}]")
-    return val
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise ConfigError(f"{path} is not valid YAML: {e}") from e
+    if raw is None:
+        raise ConfigError(f"{path} is empty.")
+
+    if Path(".env").exists():
+        load_dotenv(".env")
+
+    resolver = _EnvResolver()
+    resolved = resolver.resolve(raw)
+    if resolver._missing:
+        listed = ", ".join(sorted(set(resolver._missing)))
+        raise ConfigError(
+            f"Missing environment variable(s): {listed}. Define them in `.env`."
+        )
+
+    try:
+        cfg = AppConfig.model_validate(resolved)
+    except Exception as e:  # noqa: BLE001 — pydantic ValidationError
+        raise ConfigError(f"Config validation failed:\n{e}") from e
+    return cfg

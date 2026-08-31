@@ -1,34 +1,72 @@
 # ============================================================================
-#  STANDALONE B2B LEAD SCRAPER — CONFIGURATION
-#  One file drives a job. Copy to wherever you run; keep secrets out of VCS.
+#  ADVANCE B2B GMS — CONFIGURATION
+#  One file drives a job. Keep secrets out of VCS; use ${VAR} for .env values.
 # ============================================================================
 
 job:
   client_name: campaign
   output_dir: output
+  default_country: US
 
 queries:
-  - "pool & spa service in Dallas, TX"
-  - "dentist in Austin, TX"
+  - "dentists in Dallas, TX"
+  - "pool & spa service in Austin, TX"
 
 maps:
   headless: true
   hl: "en"
   gl: "us"
-  max_results_per_query: 0        # 0 = unlimited
-  max_total_results: 0            # 0 = unlimited
+  zoom: 16                  # 0-21; higher = more results per city, slower
+  max_results_per_query: 0  # 0 = unlimited
+  max_total_results: 0      # 0 = unlimited
+  scroll_pause_seconds: 2.0
+  max_scrolls: 0            # 0 = scroll until no new results
 
-# The FREE review-quality add-on. Runs entirely offline; no paid APIs.
+# --- FREE review-quality add-on (offline, no paid APIs) ---
 reviews:
   enabled: true
   per_business: 5
-  min_len: 20
-  max_len: 600
+  min_len: 0
+  max_len: 1000
 
 enrichment:
   emails: true
+  social: true
+  tech_detect: true
+  decision_makers: false    # extra pass (off by default)
+  mx_verify: false          # off by default
+  smtp_verify: false        # off by default
   require_website: false
 
 runtime:
   website_workers: 4
   playwright_workers: 2
+  request_timeout: 20.0
+  idle_exit_seconds: 0      # 0 = disabled
+  pacing: 1.0
+
+# --- Grid scraping (bypass ~120 results/search cap) ---
+grid:
+  enabled: false
+  cell_size_km: 3.0
+
+# --- Polygon search (paste a GeoJSON FeatureCollection from geojson.io) ---
+geo:
+  polygons: []              # e.g. [{ "type": "Polygon", "coordinates": [...] }]
+
+# --- Proxy support (off by default; free tier uses no proxies) ---
+proxy:
+  enabled: false
+  urls: []
+  file: ""
+  rotation: round_robin
+
+analysis:
+  enabled: true
+  lexicon_hint: ""
+
+filters:
+  include_all: []           # record passes only if ALL hold (AND)
+  include_any: []           # record passes if ANY hold (OR)
+  exclude_all: []           # reject if ALL hold
+  exclude_any: []           # reject if ANY hold

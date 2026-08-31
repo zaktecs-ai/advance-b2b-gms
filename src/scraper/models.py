@@ -1,175 +1,140 @@
-"""Data model for the standalone B2B Google-Maps lead scraper.
+"""Data model: the master output schema and internal record representation.
 
-Clean-room implementation (not derived from any other project's source): only the
-domain vocabulary shared across Google-Maps lead scraping is used. This package is
-self-contained and carries its own data contract.
+Every column in ``OUTPUT_COLUMNS`` is the single source of truth for the CSV
+header, the XLSX sheet, and validation. Unavailable data is rendered with the
+configured missing-value (default ``"N/A"``) — never guessed or fabricated.
+
+The schema deliberately expands on a basic listing with the "gold mine"
+signals so a sales person can triage a lead at a glance: review-derived
+quality, social presence, ownership, and ad-spend intent.
 """
 from __future__ import annotations
 
-import re
-import uuid
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
-# Column order defines the CSV/XLSX output order.
+# Canonical output column order — THE single source of truth for exports.
 OUTPUT_COLUMNS: list[str] = [
-    # identity / identifiers
-    "business_name",
-    "category",
-    "place_id",
-    "kgmid",
-    "google_maps_url",
-    # contact
-    "phone",
-    "website",
-    "address",
-    "city",
-    "state",
-    "country",
-    "latitude",
-    "longitude",
-    "plus_code",
-    # maps intelligence
-    "rating",
-    "review_count",
-    "business_status",
-    "business_hours",
-    # website + tech
-    "website_status",
-    "emails",
+    # --- Identity (kgmid is the authoritative, never-null key) ---
+    "kgmid", "place_id", "cid", "business_name", "category", "subcategory",
+    "phone", "phone_international", "website", "address", "full_address",
+    "city", "state", "postal_code", "country", "latitude", "longitude",
+    "plus_code", "google_maps_url", "timezone",
+    # --- Maps intelligence ---
+    "rating", "review_count", "reviews_per_rating", "claimed_status",
+    "business_status", "business_hours", "popular_times", "business_description",
+    "about", "owner", "owner_posts", "can_claim", "is_spending_on_ads",
+    "competitors", "featured_question", "gas_prices",
+    # --- Provenance ---
+    "source_query", "source_location", "source_keyword",
+    # --- Website intelligence ---
+    "website_status", "website_failure_reason",
+    "emails", "email_count",
+    "facebook", "instagram", "linkedin", "youtube", "twitter_x",
+    "tiktok", "pinterest", "github", "snapchat",
     "tech_stack",
-    # ---- the free add-on feature block ----
-    "top_review",
-    "review_keywords",
-    "sentiment_score",
-    "lead_score",
-    "pitch_hook",
+    # Technologies (individual)
+    "cms", "analytics", "tag_manager", "meta_pixel", "ga4", "gtm",
+    "advertising", "booking_system", "chat_widget", "ssl",
+    # Signals
+    "signal_pricing", "signal_financing", "signal_licensed_insured",
+    "signal_established", "signal_portfolio", "signal_mobile_service",
+    "signal_membership",
+    # --- Review-quality lead scoring (the free add-on) ---
+    "sentiment_score", "review_keywords", "lead_score", "pitch_hook", "top_review",
+    # --- Decision-maker enrichment ---
+    "decision_maker_name", "decision_maker_title",
+    # --- Verification ---
+    "mx_enabled", "mx_status", "mx_reason",
+    "smtp_enabled", "smtp_status", "smtp_reason",
+    # --- Housekeeping ---
+    "filtered_out_reason", "record_id",
 ]
-
-MISSING = "N/A"
-
-# Leading-word stems that signal one business type or another (keyword features).
-_NEGATIVE_LEAD_WORDS: tuple[str, ...] = (
-    "worst", "terrible", "terribly", "awful", "horrible", "rude", "scam",
-    "disappoint", "not happy", "unhappy", "avoid", "regret", "mistake",
-)
 
 
 @dataclass
-class Business:
-    """A single business listing discovered on Google Maps."""
+class BusinessRecord:
+    """Internal record before commit. ``data`` holds all OUTPUT_COLUMNS keys."""
 
-    business_name: str = MISSING
-    category: str = MISSING
-    place_id: str = MISSING
-    kgmid: str = MISSING
-    google_maps_url: str = MISSING
-    phone: str = MISSING
-    website: str = MISSING
-    address: str = MISSING
-    city: str = MISSING
-    state: str = MISSING
-    country: str = MISSING
-    latitude: float | None = None
-    longitude: float | None = None
-    plus_code: str = MISSING
-    rating: float | None = None
-    review_count: int | None = None
-    business_status: str = MISSING
-    business_hours: str = MISSING
-    # website enrichment
-    website_status: str = MISSING
-    emails: list[str] = field(default_factory=list)
-    tech_stack: list[str] = field(default_factory=list)
-    # the free add-on feature fields
-    reviews: list[str] = field(default_factory=list)
-    sentiment_score: float = 0.0
-    lead_score: float = 0.0
-    review_keywords: list[str] = field(default_factory=list)
+    data: dict[str, Any] = field(default_factory=dict)
+    # Evidence map for signals (name -> evidence string).
+    evidence: dict[str, str] = field(default_factory=dict)
 
-    # internal
-    record_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    evidence: dict[str, Any] = field(default_factory=dict)
+    def __post_init__(self) -> None:
+        self.data.setdefault("record_id", "")
 
-    # ---- derived accessors ----
-    @property
-    def top_review(self) -> str:
-        """The most representative review (highest sentiment, not a complaint)."""
-        if not self.reviews:
-            return MISSING
-        return self.reviews[0]
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.data.get(key, default)
 
-    @property
-    def pitch_hook(self) -> str:
-        """A one-sentence, data-grounded hook an outreach agent can open with."""
-        parts: list[str] = []
-        if self.review_count and self.rating is not None:
-            parts.append(f"{self.rating:.1f} stars across {self.review_count} reviews")
-        if self.review_keywords:
-            parts.append("customers mention " + ", ".join(self.review_keywords[:3]))
-        if self.category and self.category != MISSING:
-            parts.append("in " + self.category.lower())
-        if not parts:
-            return MISSING
-        return "; ".join(parts) + "."
+    def set(self, key: str, value: Any) -> None:
+        self.data[key] = value
 
-    def to_row(self) -> dict[str, Any]:
-        """Serialize to the flat output row (order follows OUTPUT_COLUMNS)."""
-        row: dict[str, Any] = {
-            "business_name": self.business_name,
-            "category": self.category,
-            "place_id": self.place_id,
-            "kgmid": self.kgmid,
-            "google_maps_url": self.google_maps_url,
-            "phone": self.phone,
-            "website": self.website,
-            "address": self.address,
-            "city": self.city,
-            "state": self.state,
-            "country": self.country,
-            "latitude": _f(self.latitude),
-            "longitude": _f(self.longitude),
-            "plus_code": self.plus_code,
-            "rating": _f(self.rating),
-            "review_count": _f(self.review_count),
-            "business_status": self.business_status,
-            "business_hours": self.business_hours,
-            "website_status": self.website_status,
-            "emails": "; ".join(self.emails),
-            "tech_stack": ", ".join(self.tech_stack),
-            "top_review": self.top_review,
-            "review_keywords": ", ".join(self.review_keywords),
-            "sentiment_score": f"{self.sentiment_score:.2f}",
-            "lead_score": f"{self.lead_score:.2f}",
-            "pitch_hook": self.pitch_hook,
-        }
-        return row
-
-    def classify_sentiment(self, text: str) -> float:
-        """Simple, explainable lexicon sentiment in [-1, 1] (0 = neutral).
-
-        Counts positive vs negative lead words; negatives weigh more because an
-        angry review is more distinctive than a generic "great".
-        """
-        low = " " + text.lower() + " "
-        neg = sum(1 for w in _NEGATIVE_LEAD_WORDS if (" " + w + " ") in low or w in low)
-        pos = sum(1 for w in _POSITIVE_LEAD_WORDS if (" " + w + " ") in low)
-        if pos == 0 and neg == 0:
-            return 0.0
-        raw = (pos - 2.0 * neg) / (pos + neg + 1e-9)
-        return max(-1.0, min(1.0, raw))
+    def as_row(self, missing: str = "N/A") -> list[str]:
+        """Return values in canonical column order."""
+        return [_to_cell(self.data.get(col), missing) for col in OUTPUT_COLUMNS]
 
 
-# Positive stems (defined here so classify_sentiment stays self-contained).
-_POSITIVE_LEAD_WORDS: tuple[str, str, ...] = (
-    "great", "excellent", "amazing", "awesome", "fantastic", "wonderful",
-    "love", "loved", "best", "recommend", "highly recommend", "helpful",
-    "friendly", "professional", "clean", "fast", "quick", "affordable",
-    "knowledgeable", "responsive", "top-notch", "pleased", "happy",
-)
-
-
-def _f(value: Any) -> str:
-    if value is None:
-        return MISSING
+def _to_cell(value: Any, missing: str) -> str:
+    if value is None or value == "":
+        return missing
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return missing
+        return repr(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Website status classification — "blocked" must never become "dead".
+# ---------------------------------------------------------------------------
+
+class WebsiteStatus:
+    LIVE = "LIVE"
+    DEAD = "DEAD"
+
+
+class FailureReason:
+    HTTP_BLOCKED = "HTTP_BLOCKED"
+    CAPTCHA_DETECTED = "CAPTCHA_DETECTED"
+    JS_REQUIRED = "JS_REQUIRED"
+    DNS_FAILURE = "DNS_FAILURE"
+    TIMEOUT = "TIMEOUT"
+    TLS_ERROR = "TLS_ERROR"
+    CONNECTION_REFUSED = "CONNECTION_REFUSED"
+    NOT_FOUND = "NOT_FOUND"
+    UNKNOWN = "UNKNOWN"
+
+
+# Temporary / scraper-side reasons that must never imply a dead site.
+_TRANSIENT = {
+    FailureReason.HTTP_BLOCKED, FailureReason.CAPTCHA_DETECTED,
+    FailureReason.JS_REQUIRED, FailureReason.TIMEOUT, FailureReason.UNKNOWN,
+}
+
+
+def is_dead_signal(reason: str) -> bool:
+    """True only when the reason strongly indicates the site is gone."""
+    return reason in {
+        FailureReason.DNS_FAILURE, FailureReason.CONNECTION_REFUSED,
+        FailureReason.NOT_FOUND, FailureReason.TLS_ERROR,
+    }
+
+
+def resolve_website_status(reason: str) -> str:
+    """Map a failure reason to a website_status without conflating transient
+    failures (blocked, captcha, js-required) with a genuinely dead site."""
+    if reason in _TRANSIENT:
+        return WebsiteStatus.LIVE
+    if is_dead_signal(reason):
+        return WebsiteStatus.DEAD
+    return WebsiteStatus.LIVE
+
+
+# SMTP statuses — explicit; uncertainty is never collapsed into false certainty.
+SMTP_STATUSES = {
+    "Verified", "Invalid", "Catch-All", "Connection Failed",
+    "Blocked", "Inconclusive", "Timeout", "Not Checked",
+}
