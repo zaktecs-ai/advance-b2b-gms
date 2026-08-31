@@ -8,10 +8,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Activate the venv if present; otherwise rely on the system python.
-if [ -x ".venv/bin/activate" ]; then
+# Activate the venv if present; otherwise choose the system's Python 3.
+PYTHON_CMD="python3"
+if [ -f ".venv/bin/activate" ]; then
   # shellcheck disable=SC1091
   source ".venv/bin/activate"
+  PYTHON_CMD="python"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_CMD="python"
 fi
 
-exec python -m scraper.main "$@"
+exec "$PYTHON_CMD" -m scraper.main "$@"

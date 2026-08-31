@@ -1,137 +1,438 @@
-# Advance B2B GMS — Google Maps B2B Lead Scraper
+# Advance B2B GMS
 
-A clean-room, production-grade Google Maps B2B lead-generation engine. It
-scrapes business listings from Google Maps, enriches each one with deep website
-intelligence (emails, social profiles, tech stack, lead signals), verifies
-emails natively (MX/SMTP), and scores every lead — outputting a fully-populated
-**75-column** XLSX/CSV contract.
+## Google Maps B2B Lead Scraper
 
-## Highlights
+Advance B2B GMS collects business listings from Google Maps, enriches the
+business website, checks useful sales signals, and writes clean CSV/XLSX files.
+It is a command-line application designed for a Linux server or VPS.
 
-- **Deep Maps extraction** — clicks into each result card, waits for the detail
-  panel, and extracts ratings, review counts, hours, description, claimed/
-  business status, plus code, phone (national + international), and social
-  links via layered, drift-resistant selectors.
-- **Website intelligence** — multi-page crawl, email extraction (with
-  obfuscation decoding + domain filtering), social profile detection, tech
-  stack detection (Wappalyzer with regex fallback), and business signs
-  (GA4/GTM/Meta Pixel/booking/chat/pricing/financing/…).
-- **Native email verification** — MX via `dnspython` and SMTP via `smtplib`,
-  no paid external APIs.
-- **Data-quality boundary** — `ftfy` repairs mojibake without dropping valid
-  scripts, while `phonenumbers` formats possible global numbers as E.164 and
-  conservative address parsing avoids false city/state assignments.
-- **Lead scoring + hooks** — sentiment score, review keywords, 0–100 lead
-  score, and a pitch hook (rule-based, with an *optional* AI personalized hook).
-- **Pure CLI / background execution** — no web UI. Driven entirely by
-  `config.yaml` + `.env`. Resumes from a durable SQLite checkpoint.
-- **VPS-ready** — headless by default, or `maps.headless: false` + `vnc.display`
-  to route a visible browser to TightVNC for manual CAPTCHA solving.
+The current export has **75 producer-backed columns**. Missing values are written
+as `N/A`; unsupported Google Maps fields are not added as empty columns.
 
-## Quick start
+## What the program does
+
+For each search query, the program:
+
+1. Opens Google Maps with Playwright and collects listing cards.
+2. Clicks each listing to read the detail panel.
+3. Cleans names, addresses, URLs, text, and global phone numbers.
+4. Removes duplicate businesses.
+5. Crawls a small number of relevant website pages.
+6. Finds emails, social profiles, technologies, and business signals.
+7. Optionally extracts a decision-maker name and title.
+8. Analyzes reviews and creates a lead score and pitch hook.
+9. Writes `leads.csv`, `leads.xlsx`, and `summary.json`.
+10. Saves a checkpoint so an interrupted job can continue later.
+
+## 1. First-time installation on a server
+
+These commands assume Ubuntu 22.04/24.04 and the repository is installed in
+`/opt/advance-b2b-gms`. You can use another directory; just change the `cd`
+path in every command.
+
+### Connect to the server
+
+Run this on your own computer:
 
 ```bash
-./setup.sh                # apt deps -> venv -> pip -> playwright chromium
-cp .env.example .env      # (optional) add API keys / proxy
-./run.sh --demo           # offline test — sample records, no browser
-./run.sh                  # live scrape (config.yaml + .env)
+ssh YOUR_USER@YOUR_SERVER_IP
 ```
 
-Output lands in `output/<client_name>/leads.xlsx` (+ `leads.csv`, `summary.json`).
+### Download and install the project
 
-## Configuration
+Run these commands after you are connected to the server:
 
-Everything lives in **`config.yaml`** (the single control point) and **`.env`**
-(secrets). The most important knobs:
-
-| Section | What it does |
-|---------|--------------|
-| `queries` | Search terms, e.g. `"dentists in Dallas, TX"` |
-| `maps.headless` / `vnc.display` | Headed VNC browser for CAPTCHA solving |
-| `website.max_pages_per_site` | Bounded crawl depth per business site |
-| `enrichment.mx_verify` / `smtp_verify` | Native email verification toggles |
-| `enrichment.decision_makers` | Optional about/team-page name and title extraction |
-| `ai_hook.*` | Optional AI personalized pitch hook (see below) |
-| `filters` | Keep/reject rules (two-pass: Maps fields, then website fields) |
-
-## AI personalized pitch hook (optional, backward-compatible)
-
-The engine can generate a **context-aware, personalized** outreach hook per
-business using an LLM. It is completely optional:
-
-1. **AI mode** — set `ai_hook.enabled: true` in `config.yaml` and paste one
-   key in `.env`:
-
-   ```bash
-   OPENAI_API_KEY=sk-...        # or
-   DEEPSEEK_API_KEY=sk-...
-   ```
-
-   The engine sends the full available context (name, category, rating,
-   reviews, sentiment, keywords, location, social presence, website stack) to
-   the LLM and returns a personalized hook.
-
-2. **Rule-based mode** — no key, `enabled: false`, or any LLM failure → the
-   existing rule-based hook is used unchanged. Nothing breaks.
-
-The provider/model/key slot all live in `ai_hook:` — no other code changes are
-needed to flip modes later.
-
-## Clean console + full logs
-
-The terminal shows structured, easy-to-read progress — how many results a
-query returned, which result is being processed (X of N), the business name
-and local time, plus a final summary:
-
-```
-Advance B2B GMS — Lead Scraper
-job: campaign   |   queries: 2   |   started 10:49 PM
-──────────────────────────────────────────────────────────────
-
-━━━ [1/20] gyms in Houston, TX ━━━
-   found 96 results
-        1 of 96   22:35:12   Anytime Fitness - Heights
-        2 of 96   22:35:14   LA Fitness
-        3 of 96   22:35:16   Planet Fitness
-   ↳ collected 3 of 96 · saved 3
-
-┌─ Run complete ──────────────────────────────
-   Total collected : 320
-   Total saved     : 318
-   Duplicates      : 2
-   Elapsed         : 12:03
-└──────────────────────────────────────────────
+```bash
+sudo mkdir -p /opt
+sudo chown "$USER":"$USER" /opt
+cd /opt
+git clone https://github.com/zaktecs-ai/advance-b2b-gms.git advance-b2b-gms
+cd /opt/advance-b2b-gms
+chmod +x setup.sh run.sh
+./setup.sh
+cp .env.example .env
 ```
 
-On a real terminal a live status footer (saved/collected/remaining/ETA) updates
-in place under the current query. When output is redirected (tmux log, nohup,
-cron), plain lines are emitted instead — no escape-code garbage in the log.
+`setup.sh` creates `.venv`, installs the Python packages, and installs the
+Playwright Chromium browser. It may ask for the server user's `sudo` password.
 
-Every warning and error (timeouts, blocked sites, bot challenges, selector
-drift) is written to `output/<client>/run.log` instead of spraying the screen,
-so the terminal never floods. To suppress progress lines entirely, set
-`logging.quiet: true` in `config.yaml`.
+### Confirm the installation
 
-## Output schema
+Run the offline demo first. It does not open a browser and does not contact
+Google Maps:
 
-75 columns across: identity (kgmid/place_id/cid/name/category), contact
-(phone/web/address/coords/plus-code), maps intelligence
-(rating/reviews/hours/description/claimed/status), provenance, website
-intelligence (status/emails/social/tech/signals), scoring
-(sentiment/keywords/lead-score/pitch-hook/top-review), decision-maker, and
-verification (mx/smtp).
-
-## Architecture
-
-```
-config.yaml → AppConfig (pydantic) → Pipeline
-  → MapsCollector (Playwright: card-click + detail-panel deep extraction)
-  → dedup → filters → Enricher (fetch → crawl → email/social/tech/signals)
-  → MX/SMTP verify → analysis (sentiment/lead-score/hook) → quality gate
-  → atomic CSV → checkpoint → XLSX + summary
+```bash
+cd /opt/advance-b2b-gms
+./run.sh --demo
 ```
 
-See `docs/ARCHITECTURE.md` for the full rationale.
+If the demo completes, the installation is working. Its files are written under
+`output/demo/` unless you changed the configuration.
+
+## 2. Configure a real scrape
+
+### Edit the search queries
+
+```bash
+cd /opt/advance-b2b-gms
+nano config.yaml
+```
+
+Start with a small job. For example:
+
+```yaml
+job:
+  client_name: houston-plumbers
+  output_dir: output
+  default_country: US
+  max_results_per_query: 20
+  max_total_results: 0
+
+queries:
+  - "plumbers in Houston, TX"
+
+maps:
+  headless: true
+
+reviews:
+  enabled: true
+  per_business: 5
+
+enrichment:
+  decision_makers: true
+  mx_verify: false
+  smtp_verify: false
+```
+
+Important settings:
+
+| Setting | Purpose |
+| --- | --- |
+| `job.client_name` | Creates the output folder name. Use letters, numbers, `_`, or `-`. |
+| `job.default_country` | Region used for national-format phone numbers, such as `PK`, `US`, or `GB`. |
+| `job.max_results_per_query` | Maximum listings per query; `0` means unlimited. |
+| `job.max_total_results` | Maximum listings for the entire job; `0` means unlimited. |
+| `maps.headless` | Keep `true` on a normal server. Set `false` only when VNC is ready. |
+| `reviews.enabled` | Collect review text for sentiment and scoring. |
+| `enrichment.decision_makers` | Read names/titles from fetched about/team pages. |
+| `enrichment.mx_verify` | Check whether the email domain has an MX record. |
+| `enrichment.smtp_verify` | Perform an SMTP mailbox probe; this is slower and often inconclusive. |
+
+Do not put API keys in `config.yaml`. The optional AI hook keys belong in
+`.env`:
+
+```bash
+nano .env
+```
+
+```dotenv
+OPENAI_API_KEY=
+DEEPSEEK_API_KEY=
+```
+
+Then enable the selected provider in `config.yaml` only if you want AI hooks:
+
+```yaml
+ai_hook:
+  enabled: true
+  provider: openai
+```
+
+The rule-based pitch hook remains available when AI is disabled, a key is
+missing, or the AI request fails.
+
+## 3. Commands to run the scraper
+
+Run commands from the repository directory.
+
+### Show the installed version
+
+```bash
+./run.sh --version
+```
+
+### Run the offline demo
+
+```bash
+./run.sh --demo
+```
+
+### Run the live Google Maps job
+
+```bash
+./run.sh
+```
+
+### Use a different configuration file
+
+```bash
+./run.sh --config /absolute/path/to/other-config.yaml
+```
+
+### Resume an interrupted job
+
+Run the same command again:
+
+```bash
+./run.sh
+```
+
+The SQLite checkpoint is under `output/<client_name>/checkpoint.sqlite`. Already
+completed queries are skipped, and committed records are used for deduplication.
+Do not delete the checkpoint unless you intentionally want to start a new job.
+
+### Run in the background with `nohup`
+
+```bash
+nohup ./run.sh > run-console.log 2>&1 &
+echo $!
+```
+
+Watch the console output:
+
+```bash
+tail -f run-console.log
+```
+
+Find the process later:
+
+```bash
+pgrep -af "scraper.main"
+```
+
+Stop it gracefully by replacing `PROCESS_ID` with the PID printed by `pgrep`:
+
+```bash
+kill PROCESS_ID
+```
+
+### Run inside `tmux` (recommended for long jobs)
+
+```bash
+tmux new -s abgms
+cd /opt/advance-b2b-gms
+./run.sh
+```
+
+Detach without stopping the job by pressing `Ctrl+B`, then `D`. Reconnect later:
+
+```bash
+tmux attach -t abgms
+```
+
+## 4. Updating the code on the server
+
+This is the normal update procedure after a new commit has been pushed to
+GitHub. Stop the current scraper before updating; never run `git pull` while a
+job is actively writing output files.
+
+```bash
+cd /opt/advance-b2b-gms
+
+# Check for an active scraper and stop it before updating, if necessary.
+pgrep -af "scraper.main"
+# kill PROCESS_ID
+
+# Back up local configuration and secrets first.
+cp config.yaml "config.yaml.backup-$(date +%F-%H%M%S)"
+if [ -f .env ]; then cp .env ".env.backup-$(date +%F-%H%M%S)"; fi
+
+# Check whether you have local code changes.
+git status --short
+
+# Download and apply the latest main branch.
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+git log -1 --oneline
+
+# Install any newly added Python dependencies.
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+
+# Use this only when Playwright reports that Chromium is missing.
+python -m playwright install chromium
+
+# Verify before starting a real job.
+./run.sh --demo
+```
+
+Then run the live job:
+
+```bash
+./run.sh
+```
+
+### If `git pull` stops because of local changes
+
+Do not use `git reset --hard` unless you intentionally want to discard those
+changes. First inspect the files:
+
+```bash
+git status --short
+git diff -- config.yaml .env
+```
+
+If the only local changes are your configuration, copy the backups, restore the
+configuration after updating, and then pull again. If you are unsure, stop and
+review the diff before choosing a Git command.
+
+## 5. VNC/headed mode for CAPTCHA solving
+
+Headless mode is the default. Use headed mode only when a VNC desktop is
+already running on the server:
+
+```yaml
+maps:
+  headless: false
+
+vnc:
+  display: ":2"
+  resolution: "1366x900"
+```
+
+The repository does not create or secure your VNC server. A common TightVNC
+setup is:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y tightvncserver
+vncserver :2 -geometry 1366x900 -depth 24
+```
+
+Run the scraper from the same server account that owns the VNC session:
+
+```bash
+cd /opt/advance-b2b-gms
+./run.sh
+```
+
+Stop that VNC display when finished:
+
+```bash
+vncserver -kill :2
+```
+
+Do not expose port `5902` directly to the public internet. Prefer an SSH tunnel
+from your computer:
+
+```bash
+ssh -L 5902:127.0.0.1:5902 YOUR_USER@YOUR_SERVER_IP
+```
+
+If Google shows a CAPTCHA, solve it in the VNC browser. A blocked or challenged
+query is left retryable instead of being marked as successfully completed.
+
+## 6. Where the output files are
+
+For `client_name: houston-plumbers`, files are created here:
+
+```text
+output/houston-plumbers/
+├── leads.csv
+├── leads.xlsx
+├── summary.json
+├── run.log
+├── checkpoint.sqlite
+└── checkpoint.json
+```
+
+The CSV and XLSX use the same 75-column order from
+`scraper/models.py`. The export intentionally excludes unsupported fields such
+as timezone, popular times, competitors, ownership posts, gas prices, featured
+questions, and rating buckets.
+
+## 7. Common problems
+
+### `Permission denied: ./run.sh`
+
+The repository normally stores both launcher scripts as executable. Fix a copy
+that lost its file permissions:
+
+```bash
+chmod +x setup.sh run.sh
+```
+
+### `No module named ...`
+
+Activate the environment and refresh dependencies:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+### `Chromium binary is missing`
+
+```bash
+source .venv/bin/activate
+python -m playwright install chromium
+```
+
+### The server has an old 85-column CSV
+
+The current writer fails closed rather than appending 75-column rows to an old
+header. Back up the old client output, choose a new client name or output
+folder, and run again:
+
+```bash
+mv output/OLD_CLIENT "output/OLD_CLIENT.backup-$(date +%F-%H%M%S)"
+./run.sh
+```
+
+Only do this after confirming you no longer need the old checkpoint and export.
+
+### The job says zero listings were extracted
+
+Check the query in `config.yaml`. Zero listings can mean a real empty result,
+Google consent, a CAPTCHA, a selector change, or a temporary block. Try headed
+VNC mode, inspect `output/<client_name>/run.log`, and rerun after resolving the
+browser challenge.
+
+### A job is still running after an SSH disconnect
+
+If it was started with `tmux` or `nohup`, reconnect with `tmux attach -t abgms`
+or inspect it with:
+
+```bash
+pgrep -af "scraper.main"
+```
+
+## 8. Development checks
+
+From the repository root:
+
+```bash
+source .venv/bin/activate
+python -m pytest -q
+python -m compileall -q scraper
+git diff --check
+```
+
+The test suite covers the schema contract, text and phone normalization,
+international address parsing, decision-maker propagation, signal mapping,
+checkpoint recovery, and the offline pipeline demo.
+
+## Architecture at a glance
+
+```text
+config.yaml
+    ↓
+AppConfig → Pipeline
+    ↓
+MapsCollector (Playwright reads raw browser data)
+    ↓
+normalize_listing (pure cleaning and schema projection)
+    ↓
+dedup → pre-filters → website enrichment
+    ↓
+MX/SMTP verification → review analysis → post-filters
+    ↓
+quality gate → atomic CSV → checkpoint → XLSX + summary
+```
+
+For the detailed data contracts and extension rules, read
+`docs/ARCHITECTURE.md`.
 
 ## License
 
