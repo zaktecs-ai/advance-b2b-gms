@@ -13,7 +13,7 @@ def _run(command: str, *args: str, **env_overrides: str) -> subprocess.Completed
     env = os.environ.copy()
     env.update(env_overrides)
     return subprocess.run(
-        [str(ROOT / "server.sh"), command, *args],
+        ["bash", str(ROOT / "server.sh"), command, *args],
         cwd=ROOT,
         env=env,
         text=True,

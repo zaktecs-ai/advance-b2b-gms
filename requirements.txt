@@ -1,6 +1,7 @@
 # Advance B2B GMS — runtime dependencies.
 # Python 3.9+ (compatible up to 3.12).
 
+setuptools>=61.0
 playwright>=1.40
 httpx>=0.25
 beautifulsoup4>=4.12
@@ -14,7 +15,7 @@ phonenumbers>=8.13
 ftfy>=6.2
 
 # -- optional, enables richer tech detection (falls back to regex if absent)
-wappalyzer-python3>=1.0
+wappalyzer-python3>=0.0.11
 
 # -- testing --
 pytest>=7.4
