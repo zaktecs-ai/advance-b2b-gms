@@ -75,19 +75,37 @@ needed to flip modes later.
 
 ## Clean console + full logs
 
-The terminal shows only clean, useful progress:
+The terminal shows structured, easy-to-read progress — each business listed
+with its number, local timestamp, and name, plus live totals, remaining
+queries, elapsed time, and ETA:
 
 ```
-[1/3] Query: dentists in Dallas, TX
-  progress: 42 collected, 40 saved, 1 dup, 1 filtered | elapsed 2m 15s | ETA ~4m
-  -> done (collected 40 results) in 2m 18s
-Done in 6m 02s. collected=120 saved=114 dup=4 filtered=2 failed=0
+Advance B2B GMS — Lead Scraper
+job: campaign   |   queries: 2   |   started 10:35 PM
+──────────────────────────────────────────────────────────────
+
+━━━ [1/20] gyms in Houston, TX ━━━
+     1.  22:35:12   Anytime Fitness - Heights
+     2.  22:35:14   LA Fitness
+     3.  22:35:16   Planet Fitness
+   ↳ collected 3 · saved 3
+
+┌─ Run complete ──────────────────────────────
+   Total collected : 320
+   Total saved     : 318
+   Duplicates      : 2
+   Elapsed         : 12:03
+└──────────────────────────────────────────────
 ```
+
+On a real terminal a live status footer (saved/collected/remaining/ETA) updates
+in place under the current query. When output is redirected (tmux log, nohup,
+cron), plain lines are emitted instead — no escape-code garbage in the log.
 
 Every warning and error (timeouts, blocked sites, bot challenges, selector
 drift) is written to `output/<client>/run.log` instead of spraying the screen,
-so the terminal never floods. To suppress progress lines entirely (e.g. cron),
-set `logging.quiet: true` in `config.yaml`.
+so the terminal never floods. To suppress progress lines entirely, set
+`logging.quiet: true` in `config.yaml`.
 
 ## Output schema
 

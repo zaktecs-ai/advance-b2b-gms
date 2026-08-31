@@ -75,9 +75,10 @@ def run(config_path: str, demo: bool) -> int:
     if collector is None:
         collector = DemoCollector()
 
-    # Clean console progress reporter (self-updating status line).
+    # Clean console progress reporter (structured, with business names).
     from .utils.progress import ProgressConsole
     progress = ProgressConsole(total_queries=len(config.queries),
+                               client_name=config.job.client_name,
                                quiet=config.logging.quiet if hasattr(config, "logging") else False)
 
     pipeline = Pipeline(config, collector=collector, browser_manager=browser_manager,

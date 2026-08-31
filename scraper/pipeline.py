@@ -126,18 +126,12 @@ class Pipeline:
                 self.checkpoint.mark_query_failed(query)
                 continue
             self.checkpoint.mark_query_done(query)
-            self._progress.query_done(self._query_collected)
+            self._progress.query_done()
             if self._bm is not None:
                 self._bm.mark_query()
                 self._bm.recycle()
 
-        self._progress.finish(
-            f"collected={self.counters['collected']} "
-            f"saved={self.counters['committed']} "
-            f"dup={self.counters['deduped']} "
-            f"filtered={self.counters['filtered']} "
-            f"failed={self.counters['failed']}"
-        )
+        self._progress.finish(failed=self.counters['failed'])
         self._finalize()
         return self.counters
 
@@ -147,7 +141,8 @@ class Pipeline:
         for raw in self.collector.collect(query):
             self.counters["collected"] += 1
             self._query_collected += 1
-            self._progress.record_collected()
+            name = (raw or {}).get("business_name") or "—"
+            self._progress.business_collected(self._query_collected, name)
             rec = self._normalize_record(raw, query, keyword)
             if not rec:
                 continue
@@ -191,7 +186,7 @@ class Pipeline:
         is_dup, reason, sig = self.resolver.is_duplicate(rec)
         if is_dup:
             self.counters["deduped"] += 1
-            self._progress.record_deduped()
+            self._progress.business_dup()
             return
 
         # Pass 1: pre-enrichment filters.
@@ -199,7 +194,7 @@ class Pipeline:
         if not keep:
             self.resolver.rollback(rec)
             self.counters["filtered"] += 1
-            self._progress.record_filtered()
+            self._progress.business_filtered()
             return
 
         # Enrich website (HTTP-first; multi-page; signals; social).
@@ -221,7 +216,7 @@ class Pipeline:
         if not keep2:
             self.resolver.rollback(rec)
             self.counters["filtered"] += 1
-            self._progress.record_filtered()
+            self._progress.business_filtered()
             rec["filtered_out_reason"] = freason2
             return
 
@@ -237,7 +232,7 @@ class Pipeline:
             record_id, sig.get("identity_key", ""), sig, query, rec)
         self.checkpoint.mark_committed(record_id, idx)
         self.counters["committed"] += 1
-        self._progress.record_committed()
+        self._progress.business_saved()
 
     def _enrich(self, rec: dict, website) -> None:
         if website in (None, "N/A", ""):
