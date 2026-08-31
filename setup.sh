@@ -10,6 +10,7 @@ echo "==> Installing system dependencies (apt)"
 sudo apt-get update -y
 sudo apt-get install -y \
   "$PYTHON_BIN" "$PYTHON_BIN-venv" "$PYTHON_BIN-dev" \
+  git tmux \
   libjpeg-dev zlib1g-dev libssl-dev libffi-dev \
   libxml2-dev libxslt1-dev 2>/dev/null || true
 

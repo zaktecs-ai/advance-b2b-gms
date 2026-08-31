@@ -202,7 +202,28 @@ success:
 The full operational procedure—server update, background execution, tmux,
 VNC, output paths, and troubleshooting—is in `README.md`.
 
-## 7. Development rules
+## 7. Server controller
+
+`server.sh` is a thin operational wrapper around the Python launcher. It keeps
+operator actions separate from scraping logic and provides short, repeatable
+commands:
+
+```text
+setup  → create .venv, install dependencies, create local config
+update → stop-check, fast-forward main, refresh dependencies
+config → edit config.local.yaml
+run    → start the live job in tmux (nohup fallback)
+demo   → run the offline pipeline
+status → inspect the managed process
+logs   → follow server-console.log
+stop   → send a graceful stop request
+```
+
+`config.local.yaml`, `.env`, `.abgms.pid`, and `server-console.log` are ignored
+by Git. The update command refuses to pull over local tracked code changes and
+never overwrites the operator's local configuration or output directory.
+
+## 8. Development rules
 
 When adding a new output field:
 

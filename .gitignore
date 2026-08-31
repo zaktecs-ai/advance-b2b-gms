@@ -9,11 +9,14 @@ dist/
 
 # Runtime
 output/
+config.local.yaml
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
 *.json.bak
 .env
+.abgms.pid
+server-console.log
 
 # Playwright
 .playwright/

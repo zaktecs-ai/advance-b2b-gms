@@ -2,33 +2,53 @@
 
 ## Google Maps B2B Lead Scraper
 
-Advance B2B GMS collects business listings from Google Maps, enriches the
-business website, checks useful sales signals, and writes clean CSV/XLSX files.
-It is a command-line application designed for a Linux server or VPS.
+Advance B2B GMS collects business listings from Google Maps, cleans the data,
+enriches business websites, and writes CSV/XLSX lead files. It is a command-line
+program for a Linux server or VPS.
 
-The current export has **75 producer-backed columns**. Missing values are written
-as `N/A`; unsupported Google Maps fields are not added as empty columns.
+The export contains **75 producer-backed columns**. Missing values are written as
+`N/A`; unsupported Google Maps fields are not added as empty columns.
 
-## What the program does
+## The simple way: use `server.sh`
 
-For each search query, the program:
+You do not need to remember Git, tmux, or Python commands for normal use.
+Run these commands from the repository folder:
 
-1. Opens Google Maps with Playwright and collects listing cards.
-2. Clicks each listing to read the detail panel.
-3. Cleans names, addresses, URLs, text, and global phone numbers.
-4. Removes duplicate businesses.
-5. Crawls a small number of relevant website pages.
-6. Finds emails, social profiles, technologies, and business signals.
-7. Optionally extracts a decision-maker name and title.
-8. Analyzes reviews and creates a lead score and pitch hook.
-9. Writes `leads.csv`, `leads.xlsx`, and `summary.json`.
-10. Saves a checkpoint so an interrupted job can continue later.
+```bash
+bash server.sh setup   # first time only; also fixes local permissions
+./server.sh config      # edit searches and settings
+./server.sh demo        # safe offline test
+./server.sh run         # start the real scraper
+```
 
-## 1. First-time installation on a server
+After new code is pushed to GitHub:
 
-These commands assume Ubuntu 22.04/24.04 and the repository is installed in
-`/opt/advance-b2b-gms`. You can use another directory; just change the `cd`
-path in every command.
+```bash
+./server.sh update      # update code and dependencies
+./server.sh run         # start or resume the scraper
+```
+
+### All controller commands
+
+| Command | What it does |
+| --- | --- |
+| `bash server.sh setup` | Creates the Python environment, installs dependencies and Chromium, and fixes local launcher permissions. |
+| `./server.sh update` | Downloads the latest `main` branch and refreshes dependencies. It refuses to update while a scraper is running or when local code was changed. |
+| `./server.sh config` | Opens your private `config.local.yaml` in `nano`. |
+| `./server.sh demo` | Runs sample data only. It does not contact Google Maps. |
+| `./server.sh run` | Starts the live scraper in `tmux` so it continues after an SSH disconnect. |
+| `./server.sh status` | Shows whether the scraper is running. |
+| `./server.sh logs` | Follows the live console log. Press `Ctrl+C` or `q` to leave the viewer. |
+| `./server.sh stop` | Requests a clean stop. The checkpoint remains safe. |
+| `./server.sh help` | Prints the same command list on the server. |
+
+The controller uses `config.local.yaml` for your settings and `.env` for optional
+secrets. Both files are ignored by Git and are not overwritten by an update.
+
+## 1. First-time server installation
+
+These instructions use Ubuntu 22.04/24.04 and `/opt/advance-b2b-gms`. If you
+choose another folder, use that folder consistently.
 
 ### Connect to the server
 
@@ -38,9 +58,9 @@ Run this on your own computer:
 ssh YOUR_USER@YOUR_SERVER_IP
 ```
 
-### Download and install the project
+### Install the project
 
-Run these commands after you are connected to the server:
+Run these commands after you are connected:
 
 ```bash
 sudo mkdir -p /opt
@@ -48,37 +68,31 @@ sudo chown "$USER":"$USER" /opt
 cd /opt
 git clone https://github.com/zaktecs-ai/advance-b2b-gms.git advance-b2b-gms
 cd /opt/advance-b2b-gms
-chmod +x setup.sh run.sh
-./setup.sh
-cp .env.example .env
+bash server.sh setup
 ```
 
-`setup.sh` creates `.venv`, installs the Python packages, and installs the
-Playwright Chromium browser. It may ask for the server user's `sudo` password.
+`bash server.sh setup` runs the project setup, installs Python packages, installs
+`tmux`, installs Playwright Chromium, and creates these private files when they
+do not exist:
 
-### Confirm the installation
+```text
+.env                 optional API keys and proxy settings
+config.local.yaml    your local search configuration
+```
 
-Run the offline demo first. It does not open a browser and does not contact
-Google Maps:
+The tracked `config.yaml` is a safe template. Your everyday settings belong in
+`config.local.yaml`, which is created from that template.
+
+## 2. Configure the search
+
+Open the private configuration file:
 
 ```bash
 cd /opt/advance-b2b-gms
-./run.sh --demo
+./server.sh config
 ```
 
-If the demo completes, the installation is working. Its files are written under
-`output/demo/` unless you changed the configuration.
-
-## 2. Configure a real scrape
-
-### Edit the search queries
-
-```bash
-cd /opt/advance-b2b-gms
-nano config.yaml
-```
-
-Start with a small job. For example:
+For a first test, use a small query and a small result limit:
 
 ```yaml
 job:
@@ -94,32 +108,31 @@ queries:
 maps:
   headless: true
 
-reviews:
-  enabled: true
-  per_business: 5
-
 enrichment:
   decision_makers: true
   mx_verify: false
   smtp_verify: false
 ```
 
-Important settings:
+The settings you will use most often are:
 
-| Setting | Purpose |
+| Setting | Meaning |
 | --- | --- |
-| `job.client_name` | Creates the output folder name. Use letters, numbers, `_`, or `-`. |
-| `job.default_country` | Region used for national-format phone numbers, such as `PK`, `US`, or `GB`. |
-| `job.max_results_per_query` | Maximum listings per query; `0` means unlimited. |
-| `job.max_total_results` | Maximum listings for the entire job; `0` means unlimited. |
-| `maps.headless` | Keep `true` on a normal server. Set `false` only when VNC is ready. |
-| `reviews.enabled` | Collect review text for sentiment and scoring. |
-| `enrichment.decision_makers` | Read names/titles from fetched about/team pages. |
-| `enrichment.mx_verify` | Check whether the email domain has an MX record. |
-| `enrichment.smtp_verify` | Perform an SMTP mailbox probe; this is slower and often inconclusive. |
+| `job.client_name` | Name of the output folder. Use letters, numbers, `_`, or `-`. |
+| `job.default_country` | Country for national phone numbers, for example `PK`, `US`, or `GB`. |
+| `job.max_results_per_query` | Maximum listings per search. `0` means unlimited. |
+| `job.max_total_results` | Maximum listings for the entire run. `0` means unlimited. |
+| `queries` | Google Maps searches to run. Add one query per line. |
+| `maps.headless` | Keep `true` on a normal server. Use `false` only with VNC configured. |
+| `reviews.enabled` | Collect reviews for sentiment and lead scoring. |
+| `enrichment.decision_makers` | Extract names and titles from about/team pages. |
+| `enrichment.mx_verify` | Check whether an email domain has MX records. |
+| `enrichment.smtp_verify` | Probe mail servers; slower and often inconclusive. |
 
-Do not put API keys in `config.yaml`. The optional AI hook keys belong in
-`.env`:
+### Optional AI pitch hooks
+
+Do not put secrets in `config.local.yaml`. Add an API key to `.env` only when
+using AI-generated pitch hooks:
 
 ```bash
 nano .env
@@ -130,7 +143,7 @@ OPENAI_API_KEY=
 DEEPSEEK_API_KEY=
 ```
 
-Then enable the selected provider in `config.yaml` only if you want AI hooks:
+Then enable one provider in `config.local.yaml`:
 
 ```yaml
 ai_hook:
@@ -138,161 +151,99 @@ ai_hook:
   provider: openai
 ```
 
-The rule-based pitch hook remains available when AI is disabled, a key is
-missing, or the AI request fails.
+If AI is disabled, the key is missing, or the request fails, the rule-based
+pitch hook is used automatically.
 
-## 3. Commands to run the scraper
+## 3. Run and control the scraper
 
-Run commands from the repository directory.
-
-### Show the installed version
+### Safe offline test
 
 ```bash
-./run.sh --version
+./server.sh demo
 ```
 
-### Run the offline demo
+This uses sample businesses only. It does not open Google Maps.
+
+### Start the live scraper
 
 ```bash
-./run.sh --demo
+./server.sh run
 ```
 
-### Run the live Google Maps job
+The scraper runs in a `tmux` session. You can close SSH and the job continues.
+The same command can be used again after an interruption; the checkpoint skips
+completed queries and continues unfinished work.
+
+### Check progress
 
 ```bash
-./run.sh
+./server.sh status
+./server.sh logs
 ```
 
-### Use a different configuration file
-
-```bash
-./run.sh --config /absolute/path/to/other-config.yaml
-```
-
-### Resume an interrupted job
-
-Run the same command again:
-
-```bash
-./run.sh
-```
-
-The SQLite checkpoint is under `output/<client_name>/checkpoint.sqlite`. Already
-completed queries are skipped, and committed records are used for deduplication.
-Do not delete the checkpoint unless you intentionally want to start a new job.
-
-### Run in the background with `nohup`
-
-```bash
-nohup ./run.sh > run-console.log 2>&1 &
-echo $!
-```
-
-Watch the console output:
-
-```bash
-tail -f run-console.log
-```
-
-Find the process later:
-
-```bash
-pgrep -af "scraper.main"
-```
-
-Stop it gracefully by replacing `PROCESS_ID` with the PID printed by `pgrep`:
-
-```bash
-kill PROCESS_ID
-```
-
-### Run inside `tmux` (recommended for long jobs)
-
-```bash
-tmux new -s abgms
-cd /opt/advance-b2b-gms
-./run.sh
-```
-
-Detach without stopping the job by pressing `Ctrl+B`, then `D`. Reconnect later:
+If `tmux` is available, the status output also shows the command to view the
+live terminal directly:
 
 ```bash
 tmux attach -t abgms
 ```
 
-## 4. Updating the code on the server
+Detach from tmux without stopping the scraper with `Ctrl+B`, then `D`.
 
-This is the normal update procedure after a new commit has been pushed to
-GitHub. Stop the current scraper before updating; never run `git pull` while a
-job is actively writing output files.
+### Stop the scraper
+
+```bash
+./server.sh stop
+```
+
+The stop command requests a graceful shutdown. Do not delete the output folder
+or checkpoint when stopping a job.
+
+## 4. Update the server after a GitHub change
+
+The normal update is only two commands:
 
 ```bash
 cd /opt/advance-b2b-gms
-
-# Check for an active scraper and stop it before updating, if necessary.
-pgrep -af "scraper.main"
-# kill PROCESS_ID
-
-# Back up local configuration and secrets first.
-cp config.yaml "config.yaml.backup-$(date +%F-%H%M%S)"
-if [ -f .env ]; then cp .env ".env.backup-$(date +%F-%H%M%S)"; fi
-
-# Check whether you have local code changes.
-git status --short
-
-# Download and apply the latest main branch.
-git fetch origin
-git checkout main
-git pull --ff-only origin main
-git log -1 --oneline
-
-# Install any newly added Python dependencies.
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-
-# Use this only when Playwright reports that Chromium is missing.
-python -m playwright install chromium
-
-# Verify before starting a real job.
-./run.sh --demo
+./server.sh update
+./server.sh run
 ```
 
-Then run the live job:
+`server.sh update` does the following safely:
+
+- refuses to update if a scraper is still running;
+- downloads the latest `main` branch;
+- refreshes the Python dependencies; and
+- keeps `config.local.yaml`, `.env`, and `output/` in place.
+
+Run the offline demo between update and the live run when you want an extra
+check:
 
 ```bash
-./run.sh
+./server.sh update
+./server.sh demo
+./server.sh run
 ```
 
-### If `git pull` stops because of local changes
+### If the update says local code changes exist
 
-Do not use `git reset --hard` unless you intentionally want to discard those
-changes. First inspect the files:
+Do not use `git reset --hard` unless you intentionally want to delete local code.
+Inspect the situation first:
 
 ```bash
 git status --short
-git diff -- config.yaml .env
+git diff
 ```
 
-If the only local changes are your configuration, copy the backups, restore the
-configuration after updating, and then pull again. If you are unsure, stop and
-review the diff before choosing a Git command.
+Your normal search settings should be in `config.local.yaml`, not in tracked
+`config.yaml`, so configuration changes normally do not block updates.
 
-## 5. VNC/headed mode for CAPTCHA solving
+## 5. Optional VNC mode for CAPTCHA solving
 
-Headless mode is the default. Use headed mode only when a VNC desktop is
-already running on the server:
+Headless mode is recommended. Use VNC only when you need to see the browser or
+solve a CAPTCHA manually.
 
-```yaml
-maps:
-  headless: false
-
-vnc:
-  display: ":2"
-  resolution: "1366x900"
-```
-
-The repository does not create or secure your VNC server. A common TightVNC
-setup is:
+Install and start a basic TightVNC display:
 
 ```bash
 sudo apt-get update
@@ -300,32 +251,40 @@ sudo apt-get install -y tightvncserver
 vncserver :2 -geometry 1366x900 -depth 24
 ```
 
-Run the scraper from the same server account that owns the VNC session:
+Open the config and change:
 
-```bash
-cd /opt/advance-b2b-gms
-./run.sh
+```yaml
+maps:
+  headless: false
+
+vnc:
+  display: ":2"
 ```
 
-Stop that VNC display when finished:
+Then start the scraper normally:
 
 ```bash
-vncserver -kill :2
+./server.sh config
+./server.sh run
 ```
 
-Do not expose port `5902` directly to the public internet. Prefer an SSH tunnel
+To view the remote desktop without exposing VNC publicly, create an SSH tunnel
 from your computer:
 
 ```bash
 ssh -L 5902:127.0.0.1:5902 YOUR_USER@YOUR_SERVER_IP
 ```
 
-If Google shows a CAPTCHA, solve it in the VNC browser. A blocked or challenged
-query is left retryable instead of being marked as successfully completed.
+Do not expose port `5902` directly to the public internet. Stop the VNC display
+when finished:
 
-## 6. Where the output files are
+```bash
+vncserver -kill :2
+```
 
-For `client_name: houston-plumbers`, files are created here:
+## 6. Output files
+
+For `client_name: houston-plumbers`, the output is:
 
 ```text
 output/houston-plumbers/
@@ -337,65 +296,80 @@ output/houston-plumbers/
 └── checkpoint.json
 ```
 
-The CSV and XLSX use the same 75-column order from
-`scraper/models.py`. The export intentionally excludes unsupported fields such
-as timezone, popular times, competitors, ownership posts, gas prices, featured
-questions, and rating buckets.
+CSV and XLSX use the same 75-column order from `scraper/models.py`. Unsupported
+fields such as timezone, popular times, competitors, ownership posts, gas
+prices, featured questions, and rating buckets are intentionally excluded.
 
 ## 7. Common problems
 
-### `Permission denied: ./run.sh`
-
-If a clone or file transfer does not preserve the launcher permissions, fix
-both scripts with:
+### `Permission denied: ./server.sh`
 
 ```bash
-chmod +x setup.sh run.sh
+chmod +x server.sh setup.sh run.sh
 ```
 
 ### `No module named ...`
 
-Activate the environment and refresh dependencies:
+```bash
+./server.sh update
+```
+
+If this is a new installation, use:
 
 ```bash
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+./server.sh setup
 ```
 
 ### `Chromium binary is missing`
 
 ```bash
-source .venv/bin/activate
-python -m playwright install chromium
+./server.sh setup
+```
+
+### The job is already running
+
+```bash
+./server.sh status
+./server.sh logs
+```
+
+Stop it only when you really want to stop the run:
+
+```bash
+./server.sh stop
 ```
 
 ### The server has an old 85-column CSV
 
-The current writer fails closed rather than appending 75-column rows to an old
-header. Back up the old client output, choose a new client name or output
-folder, and run again:
+The current writer refuses to mix the old and new schemas. Keep the old output
+as a backup, change `job.client_name` in `config.local.yaml`, and run again:
 
 ```bash
-mv output/OLD_CLIENT "output/OLD_CLIENT.backup-$(date +%F-%H%M%S)"
-./run.sh
+./server.sh config
+./server.sh run
 ```
 
-Only do this after confirming you no longer need the old checkpoint and export.
+If you intentionally archive the old client folder, do that only after confirming
+you no longer need its CSV, XLSX, or checkpoint.
 
-### The job says zero listings were extracted
+### Google shows a CAPTCHA or zero listings
 
-Check the query in `config.yaml`. Zero listings can mean a real empty result,
-Google consent, a CAPTCHA, a selector change, or a temporary block. Try headed
-VNC mode, inspect `output/<client_name>/run.log`, and rerun after resolving the
-browser challenge.
-
-### A job is still running after an SSH disconnect
-
-If it was started with `tmux` or `nohup`, reconnect with `tmux attach -t abgms`
-or inspect it with:
+Check the log:
 
 ```bash
-pgrep -af "scraper.main"
+./server.sh logs
+```
+
+A challenge or temporary block is retryable. If needed, configure VNC mode,
+solve the challenge in the visible browser, and run again.
+
+### SSH disconnected
+
+The normal `./server.sh run` command uses `tmux`. Reconnect and check:
+
+```bash
+./server.sh status
+./server.sh logs
 ```
 
 ## 8. Development checks
@@ -403,20 +377,28 @@ pgrep -af "scraper.main"
 From the repository root:
 
 ```bash
-source .venv/bin/activate
-python -m pytest -q
-python -m compileall -q scraper
+python3 -m pytest -q
+python3 -m compileall -q scraper
 git diff --check
 ```
 
-The test suite covers the schema contract, text and phone normalization,
-international address parsing, decision-maker propagation, signal mapping,
-checkpoint recovery, and the offline pipeline demo.
+The offline demo is also a quick end-to-end check:
+
+```bash
+./server.sh demo
+```
+
+The lower-level launcher is still available for advanced use:
+
+```bash
+./run.sh --demo
+./run.sh --config /absolute/path/to/config.yaml
+```
 
 ## Architecture at a glance
 
 ```text
-config.yaml
+config.local.yaml
     ↓
 AppConfig → Pipeline
     ↓
@@ -431,8 +413,9 @@ MX/SMTP verification → review analysis → post-filters
 quality gate → atomic CSV → checkpoint → XLSX + summary
 ```
 
-For the detailed data contracts and extension rules, read
-`docs/ARCHITECTURE.md`.
+For module responsibilities, data contracts, normalization rules, failure
+handling, and extension guidance, read
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## License
 
