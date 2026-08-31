@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Simple server controller for Advance B2B GMS.
 # Daily use:
-#   ./server.sh update   # download the latest GitHub code
-#   ./server.sh run      # start the scraper in tmux and survive SSH logout
+#   ./server.sh setup   # install the project + Playwright (first time)
+#   ./server.sh run     # start the scraper in tmux and survive SSH logout
+#   ./server.sh update  # download the latest GitHub code
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,14 +91,14 @@ check_not_running() {
 cmd_setup() {
   require_file "$ROOT_DIR/setup.sh"
   say "Installing Python, Playwright, and project dependencies."
-  chmod +x "$ROOT_DIR/setup.sh" "$ROOT_DIR/run.sh" "$ROOT_DIR/server.sh"
+  chmod +x "$ROOT_DIR/setup.sh" "$ROOT_DIR/run.sh" "$ROOT_DIR/server.sh" "$ROOT_DIR/vnc-screen.sh" 2>/dev/null || true
   "$ROOT_DIR/setup.sh"
   if [ ! -f "$ROOT_DIR/.env" ] && [ -f "$ROOT_DIR/.env.example" ]; then
     cp "$ROOT_DIR/.env.example" "$ROOT_DIR/.env"
     say "Created .env from .env.example. Add optional API keys if needed."
   fi
   ensure_config
-  say "Setup complete. Next: ./server.sh config, then ./server.sh demo"
+  say "Setup complete. Next: ./server.sh config, then ./server.sh run --demo"
 }
 
 cmd_update() {
@@ -113,7 +114,7 @@ cmd_update() {
   git checkout main
   git pull --ff-only origin main
 
-  chmod +x "$ROOT_DIR/setup.sh" "$ROOT_DIR/run.sh" "$ROOT_DIR/server.sh"
+  chmod +x "$ROOT_DIR/setup.sh" "$ROOT_DIR/run.sh" "$ROOT_DIR/server.sh" "$ROOT_DIR/vnc-screen.sh" 2>/dev/null || true
   ensure_config
   if [ ! -x "$ROOT_DIR/.venv/bin/python" ]; then
     fail "Python environment is missing. Run './server.sh setup' first."
@@ -121,19 +122,24 @@ cmd_update() {
 
   say "Refreshing Python dependencies."
   "$ROOT_DIR/.venv/bin/python" -m pip install -r "$ROOT_DIR/requirements.txt"
-  say "Update complete. Next: ./server.sh demo, then ./server.sh run"
-}
-
-cmd_demo() {
-  check_not_running
-  ensure_config
-  say "Running the offline demo. Google Maps is not contacted."
-  bash "$ROOT_DIR/run.sh" --demo --config "$CONFIG_FILE"
+  say "Update complete. Next: ./server.sh run --demo, then ./server.sh run"
 }
 
 cmd_run() {
+  local use_demo=false
+  if [ "${1:-}" = "--demo" ]; then
+    use_demo=true
+  fi
+
   check_not_running
   ensure_config
+
+  if [ "$use_demo" = true ]; then
+    say "Running the offline demo. Google Maps is not contacted."
+    bash "$ROOT_DIR/run.sh" --demo --config "$CONFIG_FILE"
+    return
+  fi
+
   read_client_name
   mkdir -p "$OUTPUT_DIR"
 
@@ -232,13 +238,13 @@ First time:
   bash server.sh setup   Install the project and Playwright
 
 Everyday commands:
-  ./server.sh update      Pull the latest GitHub main and refresh dependencies
-  ./server.sh run         Start the live scraper in tmux/nohup
-  ./server.sh status      Show whether the scraper is running
-  ./server.sh logs        Follow the live console log (Ctrl+C leaves scraper running)
-  ./server.sh stop        Ask the running scraper to stop cleanly
-  ./server.sh config      Open config.local.yaml in nano (or $EDITOR)
-  ./server.sh demo        Run the offline demo; Google Maps is not contacted
+  ./server.sh run        Start the live scraper in tmux/nohup
+  ./server.sh demo       Run the offline demo; Google Maps is not contacted
+  ./server.sh status     Show whether the scraper is running
+  ./server.sh logs       Follow the live console log (Ctrl+C leaves scraper running)
+  ./server.sh stop       Ask the running scraper to stop cleanly
+  ./server.sh config     Open config.local.yaml in nano (or $EDITOR)
+  ./server.sh update     Pull the latest GitHub main and refresh dependencies
 
 The scraper reads config.local.yaml and writes output/<client_name>/.
 Set ABGMS_CONFIG=/path/to/config.yaml to use another configuration file.
@@ -249,8 +255,8 @@ command="${1:-help}"
 case "$command" in
   setup)  cmd_setup ;;
   update) cmd_update ;;
-  run)    cmd_run ;;
-  demo)   cmd_demo ;;
+  run)    cmd_run "${2:-}" ;;
+  demo)   cmd_run --demo ;;
   status) cmd_status ;;
   logs)   cmd_logs ;;
   stop)   cmd_stop ;;

@@ -93,9 +93,12 @@ delays:
   cooldown_seconds: 60
 
 # --- VNC: visible browser for manual CAPTCHA solving ----------------------
+#  The engine only reads `display` (which X screen the browser draws to).
+#  The VIEWER PORT is set in vnc-screen.sh — a NON-COMMON port, NOT 5901/5902.
+#  Start the screen with `./vnc-screen.sh`, then connect your TightVNC viewer
+#  to the address it prints (your-ip:43873). Do NOT expose a common port.
 vnc:
   display: ":2"
-  port: 5902
   resolution: "1366x900"
 
 # --- Console & logging ----------------------------------------------------

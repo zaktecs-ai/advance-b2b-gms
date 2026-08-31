@@ -243,15 +243,24 @@ Your normal search settings should be in `config.local.yaml`, not in tracked
 Headless mode is recommended. Use VNC only when you need to see the browser or
 solve a CAPTCHA manually.
 
-Install and start a basic TightVNC display:
+Install TightVNC once (the launcher will remind you if it is missing):
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y tightvncserver
-vncserver :2 -geometry 1366x900 -depth 24
 ```
 
-Open the config and change:
+Start the dedicated screen with the bundled launcher:
+
+```bash
+./vnc-screen.sh
+```
+
+This starts a **separate** display (`:2`) on a **non-common** viewer port
+(`43873` by default). It prints the exact address to connect your TightVNC
+viewer to. The engine does not open a port itself — the launcher owns it.
+
+Open the config and turn off headless:
 
 ```yaml
 maps:
@@ -268,18 +277,22 @@ Then start the scraper normally:
 ./server.sh run
 ```
 
-To view the remote desktop without exposing VNC publicly, create an SSH tunnel
-from your computer:
+Connect your TightVNC viewer to the address printed by `./vnc-screen.sh`
+(usually `YOUR_SERVER_IP:43873`).
+
+> **Do not** expose a common VNC port such as `5901`/`5902` to the public
+> internet. The launcher uses a non-common port on purpose so the screen is not
+> an easy scan target. Prefer an SSH tunnel if you must reach it remotely:
+>
+> ```bash
+> ssh -L 43873:127.0.0.1:43873 YOUR_USER@YOUR_SERVER_IP
+> ```
+
+Check / stop the screen:
 
 ```bash
-ssh -L 5902:127.0.0.1:5902 YOUR_USER@YOUR_SERVER_IP
-```
-
-Do not expose port `5902` directly to the public internet. Stop the VNC display
-when finished:
-
-```bash
-vncserver -kill :2
+./vnc-screen.sh status
+./vnc-screen.sh stop
 ```
 
 ## 6. Output files
@@ -305,7 +318,7 @@ prices, featured questions, and rating buckets are intentionally excluded.
 ### `Permission denied: ./server.sh`
 
 ```bash
-chmod +x server.sh setup.sh run.sh
+chmod +x server.sh setup.sh run.sh vnc-screen.sh
 ```
 
 ### `No module named ...`
