@@ -73,6 +73,22 @@ business using an LLM. It is completely optional:
 The provider/model/key slot all live in `ai_hook:` — no other code changes are
 needed to flip modes later.
 
+## Clean console + full logs
+
+The terminal shows only clean, useful progress:
+
+```
+[1/3] Query: dentists in Dallas, TX
+  progress: 42 collected, 40 saved, 1 dup, 1 filtered | elapsed 2m 15s | ETA ~4m
+  -> done (collected 40 results) in 2m 18s
+Done in 6m 02s. collected=120 saved=114 dup=4 filtered=2 failed=0
+```
+
+Every warning and error (timeouts, blocked sites, bot challenges, selector
+drift) is written to `output/<client>/run.log` instead of spraying the screen,
+so the terminal never floods. To suppress progress lines entirely (e.g. cron),
+set `logging.quiet: true` in `config.yaml`.
+
 ## Output schema
 
 85 columns across: identity (kgmid/place_id/cid/name/category), contact

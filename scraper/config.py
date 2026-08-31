@@ -128,6 +128,12 @@ class VNCConfig(BaseModel):
     resolution: str = "1366x900"
 
 
+class LoggingConfig(BaseModel):
+    """Console/log verbosity — keeps the terminal clean while full logs go to file."""
+    level: str = "INFO"          # file log level (DEBUG/INFO/WARNING/ERROR)
+    quiet: bool = False          # true = suppress the progress lines entirely
+
+
 class RuntimeConfig(BaseModel):
     website_workers: int = Field(default=4, ge=1, le=64)
     playwright_workers: int = Field(default=2, ge=1, le=16)
@@ -188,6 +194,7 @@ class AppConfig(BaseModel):
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
     delays: DelaysConfig = Field(default_factory=DelaysConfig)
     vnc: VNCConfig = Field(default_factory=VNCConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     grid: GridConfig = Field(default_factory=GridConfig)
     geo: GeoConfig = Field(default_factory=GeoConfig)

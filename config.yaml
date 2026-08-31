@@ -98,6 +98,14 @@ vnc:
   port: 5902
   resolution: "1366x900"
 
+# --- Console & logging ----------------------------------------------------
+#  The terminal shows ONLY clean progress (which query, how many saved,
+#  elapsed time). All warnings/errors go to output/<client>/run.log instead,
+#  so a normal run never sprays error-looking lines on screen.
+logging:
+  level: INFO              # file log detail: DEBUG / INFO / WARNING / ERROR
+  quiet: false             # true = hide the progress lines (for cron/tmux)
+
 runtime:
   website_workers: 4
   playwright_workers: 2

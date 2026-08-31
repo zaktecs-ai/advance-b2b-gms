@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from .config import ConfigError, load_config
 from .maps.collector import DemoCollector, MapsCollector
@@ -44,7 +45,10 @@ def run(config_path: str, demo: bool) -> int:
         print(f"[config error] {e}", file=sys.stderr)
         return 1
 
-    setup_logging("INFO")
+    # Log file lives next to the outputs; full debug detail goes there, while
+    # the console stays clean (progress only).
+    out_dir = Path(config.job.output_dir) / config.job.client_name
+    setup_logging("INFO", log_file=str(out_dir / "run.log"))
 
     browser_manager = None
     collector = None
@@ -71,11 +75,17 @@ def run(config_path: str, demo: bool) -> int:
     if collector is None:
         collector = DemoCollector()
 
-    pipeline = Pipeline(config, collector=collector, browser_manager=browser_manager)
+    # Clean console progress reporter (self-updating status line).
+    from .utils.progress import ProgressConsole
+    progress = ProgressConsole(total_queries=len(config.queries),
+                               quiet=config.logging.quiet if hasattr(config, "logging") else False)
+
+    pipeline = Pipeline(config, collector=collector, browser_manager=browser_manager,
+                        progress=progress)
     try:
         counters = pipeline.run()
     except KeyboardInterrupt:
-        print("interrupted — checkpoint state is durable; rerun to resume.",
+        print("\ninterrupted — checkpoint state is durable; rerun to resume.",
               file=sys.stderr)
         return 130
     finally:
@@ -85,10 +95,7 @@ def run(config_path: str, demo: bool) -> int:
             except Exception:
                 pass
 
-    print(f"Done. Collected={counters['collected']} "
-          f"Deduped={counters['deduped']} Filtered={counters['filtered']} "
-          f"Committed={counters['committed']} Failed={counters['failed']}")
-    print(f"Output: {pipeline.out_dir}/leads.xlsx")
+    print(f"\nOutput: {pipeline.out_dir}/leads.xlsx  (full log: {pipeline.out_dir}/run.log)")
     return 0
 
 

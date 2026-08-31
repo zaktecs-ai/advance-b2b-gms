@@ -55,10 +55,12 @@ def _make_record_id(raw: dict) -> str:
 
 class Pipeline:
     def __init__(self, config: AppConfig, collector: MapsCollector | None = None,
-                 browser_manager=None):
+                 browser_manager=None, progress=None):
         self.cfg = config
         self.collector = collector
         self._bm = browser_manager
+        from .utils.progress import NullProgress
+        self._progress = progress or NullProgress()
         out_dir = Path(config.job.output_dir) / config.job.client_name
         out_dir.mkdir(parents=True, exist_ok=True)
         self.out_dir = out_dir
@@ -109,29 +111,43 @@ class Pipeline:
 
     # -- collection ----------------------------------------------------------
     def run(self) -> dict:
-        for query in self.cfg.queries:
+        total = len(self.cfg.queries)
+        for idx, query in enumerate(self.cfg.queries, start=1):
             if self.checkpoint.is_query_done(query):
-                log.info("query already done: %r", query)
+                self._progress.note(f"skipped (already done): {query}")
                 continue
             self.checkpoint.register_query(query)
+            self._progress.query_started(idx, query)
             try:
                 self._process_query(query)
             except Exception as e:
                 log.error("query %r failed: %s (left un-done for retry)", query, e)
+                self._progress.note(f"query failed (will retry next run): {query}")
                 self.checkpoint.mark_query_failed(query)
                 continue
             self.checkpoint.mark_query_done(query)
+            self._progress.query_done(self._query_collected)
             if self._bm is not None:
                 self._bm.mark_query()
                 self._bm.recycle()
 
+        self._progress.finish(
+            f"collected={self.counters['collected']} "
+            f"saved={self.counters['committed']} "
+            f"dup={self.counters['deduped']} "
+            f"filtered={self.counters['filtered']} "
+            f"failed={self.counters['failed']}"
+        )
         self._finalize()
         return self.counters
 
     def _process_query(self, query: str) -> None:
         keyword = self._split_keyword(query)
+        self._query_collected = 0
         for raw in self.collector.collect(query):
             self.counters["collected"] += 1
+            self._query_collected += 1
+            self._progress.record_collected()
             rec = self._normalize_record(raw, query, keyword)
             if not rec:
                 continue
@@ -175,6 +191,7 @@ class Pipeline:
         is_dup, reason, sig = self.resolver.is_duplicate(rec)
         if is_dup:
             self.counters["deduped"] += 1
+            self._progress.record_deduped()
             return
 
         # Pass 1: pre-enrichment filters.
@@ -182,6 +199,7 @@ class Pipeline:
         if not keep:
             self.resolver.rollback(rec)
             self.counters["filtered"] += 1
+            self._progress.record_filtered()
             return
 
         # Enrich website (HTTP-first; multi-page; signals; social).
@@ -203,6 +221,7 @@ class Pipeline:
         if not keep2:
             self.resolver.rollback(rec)
             self.counters["filtered"] += 1
+            self._progress.record_filtered()
             rec["filtered_out_reason"] = freason2
             return
 
@@ -218,6 +237,7 @@ class Pipeline:
             record_id, sig.get("identity_key", ""), sig, query, rec)
         self.checkpoint.mark_committed(record_id, idx)
         self.counters["committed"] += 1
+        self._progress.record_committed()
 
     def _enrich(self, rec: dict, website) -> None:
         if website in (None, "N/A", ""):
