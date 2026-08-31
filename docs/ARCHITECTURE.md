@@ -19,99 +19,85 @@ written from scratch for this project.
 config.yaml ──► load_config() ──► AppConfig (pydantic-validated)
                                         │
                                         ▼
-              Pipeline.run()  ──► for each query ──► Collector.collect()
-                                        │                  │  (Playwright live,
-                                        │                  │   or Demo provider)
+              Pipeline.run()  ──► for each query ──► MapsCollector.collect()
+                                        │                  │  (Playwright:
+                                        │                  │   card-click +
+                                        │                  │   detail-panel
+                                        │                  │   deep extraction)
                                         ▼
-                          normalize + polygon filter
+   normalize → dedup → pre-filter → Enricher (fetch → crawl → emails/social/tech/signals)
                                         │
                                         ▼
-                          IdentityResolver.is_duplicate()  ◄── seeded from checkpoint
-                                        │
+              MX/SMTP verify → analysis (sentiment/lead-score/hook)
+                                        │                  │  (optional LLM
+                                        │                  │   personalized hook)
                                         ▼
-                          pre-enrichment filters (pass 1)
-                                        │
-                                        ▼
-                          Website enricher (HTTP-first → Playwright escalation)
-                          + email extraction + tech detection + social signals
-                                        │
-                                        ▼
-                          review analysis (sentiment / keywords / lead score)
-                                        │
-                                        ▼
-                          post-enrichment filters (pass 2)
-                                        │
-                                        ▼
-                          quality gate ──► atomic CSV append ──► checkpoint commit
+              post-filter → quality gate → atomic CSV → checkpoint → XLSX + summary
 ```
 
-## Key design decisions
+## The collector (the fix)
 
-### 1. `kgmid`-first identity dedup
+The original collector only did `page.goto(href)` and read ~12 fields, leaving
+52 of 85 columns empty. The current `MapsCollector`:
 
-Google's Knowledge Graph Machine ID (`kgmid`) is the authoritative, never-null
-key. The dedup ladder is:
+1. Navigates to the search URL (`hl`/`gl`/region forced).
+2. Dismisses the EU consent wall if present.
+3. Detects bot challenges (fails closed, retryable — never marked "done").
+4. Scrolls the results feed (`div[role="feed"]`).
+5. For each listing, **clicks the card in-place** (SPA flow) and waits for the
+   detail panel to hydrate (`h1` present), then extracts each field through
+   PRIMARY → ALTERNATE → regex fallback selectors:
+   - name, category, address (decomposed → city/state/zip/country)
+   - phone (+ international), website, plus code
+   - rating, review count (rating block → aria → regex fallback)
+   - hours (table `eK4R0e` buttons), status, claimed status, description
+   - social links (Facebook/IG/LinkedIn/YouTube/X/TikTok/Pinterest/GitHub/Snap)
+   - coords / place_id / cid / kgmid from the live URL
 
-1. `kgmid`
-2. `place_id`
-3. `(canonical domain + city)`
-4. `normalized phone`
-5. `(name key + city)`
+## Website enrichment
 
-Weak signals (`domain+city`, `phone`) never merge two listings that carry a
-distinct `kgmid`/`place_id` — that would silently drop a real multi-location
-chain. The weak-signal seen-sets are fed *only* by records lacking a strong id.
+`Enricher` fetches the homepage (HTTP-first via `httpx`), crawls a bounded set
+of relevant internal pages (contact/about/services), then:
 
-### 2. Resumable, crash-safe checkpoint
+- extracts emails (mailto → JSON-LD → inline scripts → visible text, with
+  obfuscation decoding + domain filtering)
+- detects social profiles (domain-anchored, per-platform)
+- detects tech stack (Wappalyzer preferred, regex fallback)
+- runs signal detectors (GA4/GTM/Meta Pixel/booking/chat + business keywords)
 
-SQLite in WAL mode (`synchronous=NORMAL`) tracks queries, per-record stage, and
-committed row offsets. A JSON mirror + `.backup` are maintained. On restart,
-dedup seen-sets are re-seeded from **committed** records only, so an in-flight
-record is never mistaken for a duplicate.
+## Email verification (native, no paid APIs)
 
-### 3. Atomic append-safe CSV
+- **MX** — `dnspython` lookup, cached per-domain (TTL, size-capped).
+- **SMTP** — `smtplib` RCPT TO probe with MX-preference-ordered host failover
+  and explicit statuses (Verified / Invalid / Catch-All / Inconclusive /
+  Connection Failed). Uncertainty is never collapsed into false certainty.
 
-Each row is written, flushed, and `fsync`'d *before* the checkpoint advances.
-On open, a malformed trailing row (from a partial write) is trimmed. This
-guarantees no lost committed rows and no corrupted trailing line.
+Both are OFF by default (`enrichment.mx_verify` / `smtp_verify`).
 
-### 4. HTTP-first enrichment → Playwright escalation
+## Lead scoring + AI hooks
 
-Cheap `httpx` GET by default; escalate to a browser only when a page is
-JS-required/blocked/incomplete. A rich failure taxonomy
-(`HTTP_BLOCKED`, `CAPTCHA_DETECTED`, `JS_REQUIRED`, `DNS_FAILURE`, `TIMEOUT`,
-`TLS_ERROR`, `CONNECTION_REFUSED`, `NOT_FOUND`, `UNKNOWN`) ensures "blocked" is
-**never** conflated with "dead" — a LIVE-but-uncrawled record is preserved.
+`analysis/engine.py` produces sentiment (−1..1 lexicon), review keywords,
+0–100 lead score, a rule-based pitch hook, and the top review.
 
-### 5. Review extraction (RPC-first)
+`analysis/llm_hooks.py` adds an **optional** AI personalized hook: when
+`ai_hook.enabled` is true and an API key is present in `.env`, the full
+context is sent to OpenAI/DeepSeek; otherwise the rule-based hook is used
+(a seamless, backward-compatible fallback).
 
-Reviews come from `google.com/maps/rpc/listugcposts` (browser-session RPC) with
-a DOM-scroll fallback. The review-quality lead-scoring add-on derives
-`sentiment_score` (transparent lexicon), `review_keywords` (frequency,
-stopword-filtered), `lead_score` (0–100 composite), `pitch_hook`, and
-`top_review` — all offline, no paid APIs.
+## VNC / headed mode
 
-### 6. Grid + polygon search
+`BrowserManager` routes a visible browser to a TightVNC display by exporting
+`DISPLAY` + `XAUTHORITY` into the inherited environment — so an operator can
+watch and solve a CAPTCHA manually. Set `maps.headless: false` and
+`vnc.display`.
 
-A bounding box is tiled into km-sized cells (lat-adjusted longitude step); one
-search runs per cell to exceed the ~120 results/search cap. GeoJSON polygons
-(`geojson.io`) filter results to a user-drawn area via pure ray-casting
-point-in-polygon.
+## Resilience
 
-## Memory discipline (12 GB VM budget)
-
-For a 200k-record run on a 12 GB VM:
-
-- Never retain full page history — parse and discard.
-- Bounded caches (`DNSCache` is size-capped + TTL).
-- Deterministic query ordering + bounded parallelism so checkpoints stay
-  correct and memory stays flat.
-
-## Extensibility
-
-- **Custom signals** — add to `config.yaml` `signals:` without editing code.
-- **Proxy seam** — `ProxyManager` supports HTTP/HTTPS/SOCKS5, round-robin or
-  random, off by default.
-- **Collector seam** — `Collector.collect()` is the interface; swap the live
-  Playwright implementation for any other provider.
-- **Export seam** — CSV is canonical; XLSX and JSON summary are additive.
+- **Durable checkpoint** (SQLite WAL + JSON mirror): queries and records resume
+  across crashes; only COMMITTED records seed dedup on restart.
+- **Atomic CSV** (flush + fsync per row) with malformed-tail recovery.
+- **Browser recycling** every N queries to keep long VPS jobs healthy.
+- **Identity dedup ladder**: kgmid → place_id → (domain+city) → phone →
+  (name+city); weak signals never merge distinct strong-id listings.
+- **Rich failure taxonomy**: HTTP_BLOCKED / CAPTCHA / JS_REQUIRED / TIMEOUT are
+  transient and never misclassified as DEAD.

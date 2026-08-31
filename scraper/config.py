@@ -33,7 +33,10 @@ class ConfigError(ValueError):
 class JobConfig(BaseModel):
     client_name: str = "campaign"
     output_dir: str = "output"
+    output_filename: str = ""
     default_country: str = "US"
+    max_results_per_query: int = Field(default=0, ge=0)
+    max_total_results: int = Field(default=0, ge=0)
 
 
 class MapsConfig(BaseModel):
@@ -45,6 +48,11 @@ class MapsConfig(BaseModel):
     max_total_results: int = Field(default=0, ge=0)
     scroll_pause_seconds: float = Field(default=2.0, ge=0.1, le=30.0)
     max_scrolls: int = Field(default=0, ge=0)  # 0 = scroll until no new results
+    include_permanently_closed: bool = False
+    browser_restart_after_queries: int = Field(default=5, ge=0)
+    scroll_delay_min_ms: int = Field(default=800, ge=0)
+    scroll_delay_max_ms: int = Field(default=1600, ge=0)
+    page_navigation_timeout_ms: int = Field(default=30_000, ge=1000)
 
 
 class ReviewsConfig(BaseModel):
@@ -52,6 +60,34 @@ class ReviewsConfig(BaseModel):
     per_business: int = Field(default=5, ge=1, le=50)
     min_len: int = Field(default=0, ge=0)
     max_len: int = Field(default=1000, ge=10)
+
+
+class WebsiteConfig(BaseModel):
+    require_website: bool = False
+    enable_playwright_fallback: bool = True
+    enable_sitemap: bool = True
+    max_pages_per_site: int = Field(default=3, ge=1, le=50)
+    overall_site_timeout_seconds: float = Field(default=120.0, ge=1.0)
+    http_connect_timeout_seconds: float = Field(default=10.0, ge=1.0)
+    http_read_timeout_seconds: float = Field(default=20.0, ge=1.0)
+    http_retries: int = Field(default=1, ge=0, le=10)
+    page_navigation_timeout_seconds: float = Field(default=30.0, ge=1.0)
+    use_wappalyzer: bool = True
+
+
+class EmailConfig(BaseModel):
+    enabled: bool = True
+    max_email_length: int = Field(default=120, ge=10, le=300)
+    enable_mx_check: bool = False
+
+
+class SMTPConfig(BaseModel):
+    enabled: bool = False
+    workers: int = Field(default=3, ge=1, le=8)
+    retries: int = Field(default=1, ge=0, le=5)
+    connection_timeout_seconds: float = Field(default=10.0, ge=1.0)
+    verification_timeout_seconds: float = Field(default=20.0, ge=1.0)
+    from_email: str = "verify@example.com"
 
 
 class EnrichmentConfig(BaseModel):
@@ -64,12 +100,40 @@ class EnrichmentConfig(BaseModel):
     require_website: bool = False
 
 
+class LLMHookConfig(BaseModel):
+    """AI personalized pitch-hook toggle — the single control point."""
+    enabled: bool = False
+    provider: str = "openai"        # "openai" | "deepseek"
+    model: str = ""                 # empty = provider default
+    api_key_env: str = ""           # empty = provider default env var
+    timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+
+
+class ConcurrencyConfig(BaseModel):
+    website_workers: int = Field(default=8, ge=1, le=16)
+    playwright_workers: int = Field(default=2, ge=1, le=4)
+
+
+class DelaysConfig(BaseModel):
+    maps_min_seconds: float = Field(default=2.0, ge=0.0, le=30.0)
+    maps_max_seconds: float = Field(default=5.0, ge=0.0, le=30.0)
+    site_min_seconds: float = Field(default=0.3, ge=0.0, le=10.0)
+    site_max_seconds: float = Field(default=0.8, ge=0.0, le=10.0)
+    cooldown_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
+
+
+class VNCConfig(BaseModel):
+    display: str = ":2"
+    port: int = Field(default=5902, ge=5900, le=5999)
+    resolution: str = "1366x900"
+
+
 class RuntimeConfig(BaseModel):
     website_workers: int = Field(default=4, ge=1, le=64)
     playwright_workers: int = Field(default=2, ge=1, le=16)
     request_timeout: float = Field(default=20.0, ge=1.0, le=120.0)
     idle_exit_seconds: int = Field(default=0, ge=0)
-    pacing: float = Field(default=1.0, ge=0.0, le=30.0)  # request pacing clock
+    pacing: float = Field(default=1.0, ge=0.0, le=30.0)
 
 
 class GridConfig(BaseModel):
@@ -78,14 +142,17 @@ class GridConfig(BaseModel):
 
 
 class GeoConfig(BaseModel):
-    polygons: list[Any] = Field(default_factory=list)
+    polygons: list = Field(default_factory=list)
 
 
 class ProxyConfig(BaseModel):
     enabled: bool = False
-    urls: list[str] = Field(default_factory=list)
+    urls: list = Field(default_factory=list)
     file: str = ""
     rotation: Literal["round_robin", "random"] = "round_robin"
+    http: str = ""
+    https: str = ""
+    pool: list = Field(default_factory=list)
 
 
 class AnalysisConfig(BaseModel):
@@ -94,24 +161,40 @@ class AnalysisConfig(BaseModel):
 
 
 class FilterConfig(BaseModel):
-    include_all: list[Any] = Field(default_factory=list)
-    include_any: list[Any] = Field(default_factory=list)
-    exclude_all: list[Any] = Field(default_factory=list)
-    exclude_any: list[Any] = Field(default_factory=list)
+    include_all: list = Field(default_factory=list)
+    include_any: list = Field(default_factory=list)
+    exclude_all: list = Field(default_factory=list)
+    exclude_any: list = Field(default_factory=list)
+
+
+class SignalsConfig(BaseModel):
+    pass
+
+
+class CountryConfig(BaseModel):
+    default: str = "US"
 
 
 class AppConfig(BaseModel):
     job: JobConfig = Field(default_factory=JobConfig)
-    queries: list[str] = Field(default_factory=list)
+    queries: list = Field(default_factory=list)
     maps: MapsConfig = Field(default_factory=MapsConfig)
     reviews: ReviewsConfig = Field(default_factory=ReviewsConfig)
+    website: WebsiteConfig = Field(default_factory=WebsiteConfig)
+    email: EmailConfig = Field(default_factory=EmailConfig)
+    smtp: SMTPConfig = Field(default_factory=SMTPConfig)
     enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
+    ai_hook: LLMHookConfig = Field(default_factory=LLMHookConfig)
+    concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
+    delays: DelaysConfig = Field(default_factory=DelaysConfig)
+    vnc: VNCConfig = Field(default_factory=VNCConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     grid: GridConfig = Field(default_factory=GridConfig)
     geo: GeoConfig = Field(default_factory=GeoConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     filters: FilterConfig = Field(default_factory=FilterConfig)
+    country: CountryConfig = Field(default_factory=CountryConfig)
 
     @model_validator(mode="after")
     def _check_queries(self):
@@ -126,7 +209,7 @@ class AppConfig(BaseModel):
 
 class _EnvResolver:
     def __init__(self) -> None:
-        self._missing: list[str] = []
+        self._missing: list = []
 
     def resolve(self, value):
         if isinstance(value, str):

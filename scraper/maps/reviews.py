@@ -1,27 +1,28 @@
-"""Review extraction: RPC-first (``listugcposts``) with DOM-scroll fallback.
+"""Review extraction: RPC-first (listugcposts) + panel-feed fallback.
 
-For each business, capture the latest N review texts. The primary path fetches
-the Google Maps reviews RPC endpoint using the browser session (cookies), which
-returns structured review data; a DOM-scroll fallback reads the rendered review
-feed when the RPC path is unavailable. Extraction is toggleable.
+For each business, capture the latest N review texts. The RPC path fetches the
+Google Maps reviews endpoint using the browser session (cookies) and returns
+structured data; a live-panel scroll fallback reads the rendered review feed
+on the already-open detail panel when RPC is unavailable.
+
+Extraction is toggleable via ``reviews.enabled``.
 """
 from __future__ import annotations
 
 import json
 import logging
+import random
 import re
-from typing import Any
+import string
+import time
 
 log = logging.getLogger(__name__)
 
 _RPC_PREFIX = ")]}'"
 _PB_PLACE_TEMPLATE = "!6m4!4m1!1e1!4m1!1e3!2m2!1i{page_size}!2s{token}!5m2!1s{rid}!7e81"
-_NEXT_TOKEN_RE = re.compile(r'"([^"]+)"')
 
 
 def _generate_request_id(length: int = 20) -> str:
-    import random
-    import string
     return "".join(random.choices(string.digits + string.ascii_letters, k=length))
 
 
@@ -36,7 +37,7 @@ def build_review_rpc_url(place_id: str, page_size: int = 20, token: str = "") ->
     return f"https://www.google.com/maps/rpc/listugcposts?authuser=0&hl=en&pb={pb}"
 
 
-def parse_review_rpc_response(text: str) -> tuple[list[str], str]:
+def parse_review_rpc_response(text: str) -> tuple[list, str]:
     """Parse a raw listugcposts response into (review_texts, next_page_token)."""
     data = text
     if data.startswith(_RPC_PREFIX):
@@ -45,11 +46,9 @@ def parse_review_rpc_response(text: str) -> tuple[list[str], str]:
         parsed = json.loads(data)
     except json.JSONDecodeError:
         return [], ""
-    reviews: list[str] = []
+    reviews: list = []
     next_token = ""
     try:
-        # Structure (varies): parsed[1] is an array of review entries, parsed[2]
-        # is the next-page token. Guard every step for resilience.
         if isinstance(parsed, list) and len(parsed) > 1:
             entries = parsed[1]
             if isinstance(entries, list):
@@ -68,9 +67,9 @@ def parse_review_rpc_response(text: str) -> tuple[list[str], str]:
     return reviews, next_token
 
 
-def _extract_review_text(entry: Any) -> str:
+def _extract_review_text(entry) -> str:
     """Walk a review entry (list or nested lists) to find the review body."""
-    chunks: list[str] = []
+    chunks: list = []
     if isinstance(entry, list):
         for item in entry:
             found = _extract_review_text(item)
@@ -81,25 +80,20 @@ def _extract_review_text(entry: Any) -> str:
             if isinstance(entry.get(key), str) and len(entry[key]) > 3:
                 chunks.append(entry[key])
     elif isinstance(entry, str) and len(entry) > 3:
-        # Heuristic: strings that look like sentences.
         if any(c.isalpha() for c in entry) and len(entry.split()) >= 2:
             chunks.append(entry)
-    # Prefer the longest string found at this node as the body.
     if chunks:
         return max(chunks, key=len)
     return ""
 
 
-def parse_review_texts_dom(html: str) -> list[str]:
+def parse_review_texts_dom(html: str) -> list:
     """Fallback: pull review snippets from rendered review-feed HTML."""
     if not html:
         return []
-    # Review bodies commonly render inside elements with a class containing
-    # 'review' or a review text container; use a tolerant regex over visible text.
     soup_text = _strip_tags(html)
-    # Split into sentences and keep those that look like review content.
-    out: list[str] = []
-    seen: set[str] = set()
+    out: list = []
+    seen: set = set()
     for m in re.finditer(r"[A-Za-z0-9][^.!?]{20,500}[.!?]", soup_text):
         s = m.group(0).strip()
         if s and s not in seen and len(s) >= 10:
@@ -109,7 +103,6 @@ def parse_review_texts_dom(html: str) -> list[str]:
 
 
 def _strip_tags(html: str) -> str:
-    """Strip script/style blocks and all tags, leaving visible text."""
     txt = re.sub(r"<script.*?</script>", " ", html, flags=re.S | re.I)
     txt = re.sub(r"<style.*?</style>", " ", txt, flags=re.S | re.I)
     txt = re.sub(r"<[^>]+>", " ", txt)
@@ -117,12 +110,47 @@ def _strip_tags(html: str) -> str:
     return " ".join(txt.split())
 
 
-def filter_reviews(reviews: list[str], min_len: int = 0, max_len: int = 1000) -> list[str]:
+# -- Live-panel fallback ----------------------------------------------------
+
+_REVIEW_TEXT_SELECTORS = [
+    'div[class*="jftiEf"] span[class*="wiI7pd"]',
+    'div[class*="jftiEf"]',
+    'span[class*="wiI7pd"]',
+]
+
+
+def extract_reviews_from_panel(page, max_reviews: int = 5) -> list:
+    """Scroll the open panel's review feed and return up to max_reviews texts."""
+    texts: list = []
+    seen: set = set()
+    for _ in range(max(2, max_reviews)):
+        try:
+            page.mouse.wheel(0, 1500)
+        except Exception:
+            pass
+        time.sleep(0.8)
+        for sel in _REVIEW_TEXT_SELECTORS:
+            try:
+                locs = page.locator(sel)
+                n = locs.count()
+                for i in range(n):
+                    txt = locs.nth(i).inner_text(timeout=1500).strip()
+                    if txt and len(txt) > 8 and txt not in seen:
+                        seen.add(txt)
+                        texts.append(txt)
+                        if len(texts) >= max_reviews:
+                            return texts[:max_reviews]
+            except Exception:
+                continue
+    return texts[:max_reviews]
+
+
+def filter_reviews(reviews: list, min_len: int = 0, max_len: int = 1000) -> list:
     """Drop out-of-length and duplicate reviews."""
-    out: list[str] = []
-    seen: set[str] = set()
+    out: list = []
+    seen: set = set()
     for r in reviews:
-        r = r.strip()
+        r = (r or "").strip()
         if not r or r in seen:
             continue
         seen.add(r)

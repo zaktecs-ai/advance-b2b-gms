@@ -10,8 +10,9 @@ python-dotenv>=1.0
 dnspython>=2.4
 openpyxl>=3.1
 pydantic>=2.5
-fastapi>=0.104
-uvicorn>=0.24
+
+# -- optional, enables richer tech detection (falls back to regex if absent)
+wappalyzer-python3>=1.0
 
 # -- testing --
 pytest>=7.4

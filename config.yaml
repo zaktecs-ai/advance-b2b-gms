@@ -6,73 +6,130 @@
 job:
   client_name: campaign
   output_dir: output
+  output_filename: ""          # empty = derived from client_name
   default_country: US
+  max_results_per_query: 0     # 0 = unlimited
+  max_total_results: 0         # 0 = unlimited
 
 queries:
   - "plumbers in Houston, TX"
   - "dentists in Dallas, TX"
-  - "roofing contractors in Austin, TX"
-  - "chiropractors in Phoenix, AZ"
-  - "hair salons in Chicago, IL"
-  - "coffee shops in Seattle, WA"
-  - "gyms in Miami, FL"
-  - "restaurants in New York, NY"
 
 maps:
-  headless: true
+  headless: true               # false + vnc.display -> visible browser via VNC
   hl: "en"
   gl: "us"
-  zoom: 16                  # 0-21; higher = more results per city, slower
-  max_results_per_query: 0  # 0 = unlimited
-  max_total_results: 0      # 0 = unlimited
+  zoom: 16                     # 0-21; higher = more results per city, slower
+  max_results_per_query: 0
+  max_total_results: 0
   scroll_pause_seconds: 2.0
-  max_scrolls: 0            # 0 = scroll until no new results
+  max_scrolls: 0               # 0 = scroll until no new results
+  include_permanently_closed: false
+  browser_restart_after_queries: 5
+  scroll_delay_min_ms: 800
+  scroll_delay_max_ms: 1600
+  page_navigation_timeout_ms: 30000
 
-# --- FREE review-quality add-on (offline, no paid APIs) ---
 reviews:
   enabled: true
   per_business: 5
   min_len: 0
   max_len: 1000
 
+website:
+  require_website: false
+  enable_playwright_fallback: true
+  enable_sitemap: true
+  max_pages_per_site: 3
+  overall_site_timeout_seconds: 120
+  http_connect_timeout_seconds: 10
+  http_read_timeout_seconds: 20
+  http_retries: 1
+  page_navigation_timeout_seconds: 30
+  use_wappalyzer: true
+
+email:
+  enabled: true
+  max_email_length: 120
+  enable_mx_check: false
+
+smtp:
+  enabled: false
+  workers: 3
+  retries: 1
+  connection_timeout_seconds: 10
+  verification_timeout_seconds: 20
+  from_email: verify@example.com
+
 enrichment:
   emails: true
   social: true
   tech_detect: true
-  decision_makers: false    # extra pass (off by default)
-  mx_verify: false          # off by default
-  smtp_verify: false        # off by default
+  decision_makers: false       # extra pass (off by default)
+  mx_verify: false             # Native MX via dnspython (off by default)
+  smtp_verify: false           # Native SMTP via smtplib (off by default)
   require_website: false
+
+# --- AI personalized pitch-hook (OPTIONAL, backward-compatible) -----------
+#  When `enabled: true` AND an API key is present in `.env`, the engine sends
+#  the full business context to the LLM to generate a personalized hook.
+#  No key / disabled / LLM failure -> the rule-based hook is used unchanged.
+ai_hook:
+  enabled: false
+  provider: openai             # "openai" | "deepseek"
+  model: ""                    # empty = provider default
+  api_key_env: ""              # empty = OPENAI_API_KEY / DEEPSEEK_API_KEY
+  timeout_seconds: 30
+
+concurrency:
+  website_workers: 8
+  playwright_workers: 2
+
+delays:
+  maps_min_seconds: 2.0
+  maps_max_seconds: 5.0
+  site_min_seconds: 0.3
+  site_max_seconds: 0.8
+  cooldown_seconds: 60
+
+# --- VNC: visible browser for manual CAPTCHA solving ----------------------
+vnc:
+  display: ":2"
+  port: 5902
+  resolution: "1366x900"
 
 runtime:
   website_workers: 4
   playwright_workers: 2
   request_timeout: 20.0
-  idle_exit_seconds: 0      # 0 = disabled
+  idle_exit_seconds: 0
   pacing: 1.0
 
-# --- Grid scraping (bypass ~120 results/search cap) ---
 grid:
   enabled: false
   cell_size_km: 3.0
 
-# --- Polygon search (paste a GeoJSON FeatureCollection from geojson.io) ---
 geo:
-  polygons: []              # e.g. [{ "type": "Polygon", "coordinates": [...] }]
+  polygons: []
 
-# --- Proxy support (off by default; free tier uses no proxies) ---
 proxy:
   enabled: false
   urls: []
+  pool: []
   file: ""
   rotation: round_robin
+  http: ""                     # ${HTTP_PROXY} from .env when ready
+  https: ""
 
 analysis:
   enabled: true
   lexicon_hint: ""
 
+country:
+  default: US
+
 filters:
-  include_all: []           # record passes only if ALL hold (AND)
-  include_any: []           # record passes if ANY hold (OR)
-  exclude_all: []           # reject if ALL hold
-  exclude_any: []           # reject if ANY hold
+  include_all: []
+  include_any: []
+  exclude_all: []
+  exclude_any: []

@@ -2,9 +2,8 @@
 # One-command launcher. Handles the venv + working dir for you.
 #
 #   ./run.sh --demo          -> offline test (sample records, no browser)
-#   ./run.sh                 -> live scrape
-#   ./run.sh --serve         -> REST API + Web UI
-#   ./run.sh --config other.yaml --demo
+#   ./run.sh                 -> live scrape (config.yaml + .env)
+#   ./run.sh --config other.yaml
 set -euo pipefail
 
 cd "$(dirname "$0")"

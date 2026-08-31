@@ -1,139 +1,99 @@
-# Advance B2B GMS
+# Advance B2B GMS — Google Maps B2B Lead Scraper
 
-A **clean-room, most-capable Google Maps B2B lead scraper** in Python. It
-captures business listings *and* turns them into sellable, pre-qualified leads
-by extracting reviews and deriving a **lead-quality score**, a **pitch hook**,
-social profiles, ownership signals, and ad-spend intent — all offline, all free.
+A clean-room, production-grade Google Maps B2B lead-generation engine. It
+scrapes business listings from Google Maps, enriches each one with deep website
+intelligence (emails, social profiles, tech stack, lead signals), verifies
+emails natively (MX/SMTP), and scores every lead — outputting a fully-populated
+**85-column** XLSX.
 
-> **Important:** this repository is a self-contained, isolated project. It does
-> **not** copy, import, or link any code from any other repository, and it does
-> not modify any other repo. It shares only general domain knowledge about
-> Google Maps lead scraping, reimplemented from scratch as original code.
+## Highlights
 
----
-
-## What makes it the most capable
-
-| Capability | What it gives you |
-|------------|-------------------|
-| **Review-grounded lead scoring** | `sentiment_score`, `review_keywords`, `lead_score` (0–100), `pitch_hook`, `top_review` — prioritize and personalize outreach for free |
-| **Grid scraping** | Tiles a region into km-sized cells to bypass Google's ~120-results/search cap |
-| **Polygon / geolocation search** | Paste a GeoJSON polygon (from geojson.io) and search only inside it |
-| **Popular-times + lead signals** | Traffic histogram, `owner`, `owner_posts`, `can_claim`, `is_spending_on_ads`, `competitors`, `gas_prices`, `about` |
-| **Social profile detection** | Domain-anchored detection for 9 platforms — a Facebook URL can never land in Instagram |
-| **Email extraction + verification** | 5+ sources, obfuscation decoding, optional MX + SMTP verification (off by default) |
-| **Decision-maker enrichment** | Optional pass to extract name + title (CEO/Founder/Owner) |
-| **Crash-safe resume** | SQLite checkpoint (WAL) + atomic CSV with fsync — survive reboot/Ctrl-C/tmux drop |
-| **Smart dedup** | `kgmid`-first identity ladder; multi-location chains are never merged |
-| **Anti-block resilience** | HTTP-first enrichment → Playwright escalation; "blocked" is never "dead" |
-
-Everything runs **free and self-hosted** — no paid APIs, no paid proxies. Runs
-comfortably on an Oracle Cloud *Ampere A1 Always-Free* instance (4 OCPU / 24 GB).
-See [`docs/OCI.md`](docs/OCI.md) for the deploy guide.
-
----
+- **Deep Maps extraction** — clicks into each result card, waits for the detail
+  panel, and extracts ratings, review counts, hours, description, claimed/
+  business status, plus code, phone (national + international), and social
+  links via layered, drift-resistant selectors.
+- **Website intelligence** — multi-page crawl, email extraction (with
+  obfuscation decoding + domain filtering), social profile detection, tech
+  stack detection (Wappalyzer with regex fallback), and business signs
+  (GA4/GTM/Meta Pixel/booking/chat/pricing/financing/…).
+- **Native email verification** — MX via `dnspython` and SMTP via `smtplib`,
+  no paid external APIs.
+- **Lead scoring + hooks** — sentiment score, review keywords, 0–100 lead
+  score, and a pitch hook (rule-based, with an *optional* AI personalized hook).
+- **Pure CLI / background execution** — no web UI. Driven entirely by
+  `config.yaml` + `.env`. Resumes from a durable SQLite checkpoint.
+- **VPS-ready** — headless by default, or `maps.headless: false` + `vnc.display`
+  to route a visible browser to TightVNC for manual CAPTCHA solving.
 
 ## Quick start
 
-Requires Python 3.9+.
-
 ```bash
-# One-command setup (Ubuntu): apt deps -> venv -> pip -> Playwright Chromium
-bash setup.sh
-
-# Or manual setup:
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m playwright install chromium
+./setup.sh                # apt deps -> venv -> pip -> playwright chromium
+cp .env.example .env      # (optional) add API keys / proxy
+./run.sh --demo           # offline test — sample records, no browser
+./run.sh                  # live scrape (config.yaml + .env)
 ```
 
-### Demo mode (offline, no browser — proves the add-on)
-
-```bash
-python -m scraper.main --config config.yaml --demo
-```
-
-Output lands in `output/<client_name>/leads.csv` (plus `leads.xlsx`).
-
-### Live mode (real Google Maps collection)
-
-Edit `config.yaml` to set your `queries`, then:
-
-```bash
-python -m scraper.main --config config.yaml
-```
-
-### REST API + Web UI
-
-```bash
-python -m scraper.main --config config.yaml --serve
-# Open http://localhost:8000  (auto OpenAPI docs at /docs)
-```
-
-Endpoints: `POST /api/v1/jobs`, `GET /api/v1/jobs`, `GET/DELETE /api/v1/jobs/{id}`,
-`GET /api/v1/jobs/{id}/download`.
-
----
+Output lands in `output/<client_name>/leads.xlsx` (+ `leads.csv`, `summary.json`).
 
 ## Configuration
 
-One `config.yaml` drives everything. Secrets live in `.env` and are referenced
-as `${VAR}`. See `config.yaml` for a fully-commented template covering queries,
-maps (zoom, limits), reviews, enrichment, runtime workers, grid, geo/polygon,
-proxy, and filters.
+Everything lives in **`config.yaml`** (the single control point) and **`.env`**
+(secrets). The most important knobs:
 
-**Filters** support AND/OR/NOT with operators `= != > < >= <= in notin contains`:
+| Section | What it does |
+|---------|--------------|
+| `queries` | Search terms, e.g. `"dentists in Dallas, TX"` |
+| `maps.headless` / `vnc.display` | Headed VNC browser for CAPTCHA solving |
+| `website.max_pages_per_site` | Bounded crawl depth per business site |
+| `enrichment.mx_verify` / `smtp_verify` | Native email verification toggles |
+| `ai_hook.*` | Optional AI personalized pitch hook (see below) |
+| `filters` | Keep/reject rules (two-pass: Maps fields, then website fields) |
 
-```yaml
-filters:
-  include_all:
-    - { city: "Dallas" }
-    - { reviews: 15, op: ">=" }
-  exclude_any:
-    - { website_status: "DEAD" }
+## AI personalized pitch hook (optional, backward-compatible)
+
+The engine can generate a **context-aware, personalized** outreach hook per
+business using an LLM. It is completely optional:
+
+1. **AI mode** — set `ai_hook.enabled: true` in `config.yaml` and paste one
+   key in `.env`:
+
+   ```bash
+   OPENAI_API_KEY=sk-...        # or
+   DEEPSEEK_API_KEY=sk-...
+   ```
+
+   The engine sends the full available context (name, category, rating,
+   reviews, sentiment, keywords, location, social presence, website stack) to
+   the LLM and returns a personalized hook.
+
+2. **Rule-based mode** — no key, `enabled: false`, or any LLM failure → the
+   existing rule-based hook is used unchanged. Nothing breaks.
+
+The provider/model/key slot all live in `ai_hook:` — no other code changes are
+needed to flip modes later.
+
+## Output schema
+
+85 columns across: identity (kgmid/place_id/cid/name/category), contact
+(phone/web/address/coords/plus-code/timezone), maps intelligence
+(rating/reviews/hours/description/claimed/status), provenance, website
+intelligence (status/emails/social/tech/signals), scoring
+(sentiment/keywords/lead-score/pitch-hook/top-review), decision-maker, and
+verification (mx/smtp).
+
+## Architecture
+
+```
+config.yaml → AppConfig (pydantic) → Pipeline
+  → MapsCollector (Playwright: card-click + detail-panel deep extraction)
+  → dedup → filters → Enricher (fetch → crawl → email/social/tech/signals)
+  → MX/SMTP verify → analysis (sentiment/lead-score/hook) → quality gate
+  → atomic CSV → checkpoint → XLSX + summary
 ```
 
-## A note on responsible use
+See `docs/ARCHITECTURE.md` for the full rationale.
 
-This tool is intended for **research and lead generation within applicable
-law**. Respect each site's Terms of Service and privacy expectations. CAPTCHAs
-are **never bypassed** programmatically — they are detected, classified, and
-preserved so you can solve them manually if you choose. Do not scrape personal
-or sensitive data without authorization.
+## License
 
-## Tests
-
-```bash
-python -m pytest tests/ -q        # 95 pure-logic tests, no browser required
-```
-
-Core logic — config validation, normalization, dedup, filters, email extraction,
-review parsing + scoring, geo, checkpoint, export, and the demo pipeline — is
-fully covered by headless unit tests.
-
-## Project layout
-
-```
-scraper/
-├── main.py          # CLI + --serve entrypoints
-├── config.py        # pydantic config + validation
-├── models.py        # output schema + website-status taxonomy
-├── pipeline.py      # collect -> dedup -> filter -> enrich -> score -> export
-├── maps/            # collector (Playwright), parsing, reviews, geo (grid/polygon)
-├── websites/        # fetcher (HTTP->Playwright), crawler, enricher, tech_detect
-├── email/           # extraction + MX/SMTP verification
-├── signals/         # social + business-signal + decision-maker detection
-├── filters/         # config-driven filter engine
-├── dedup/           # kgmid-first identity resolver
-├── checkpoint/      # resumable SQLite state
-├── validation/      # per-record quality gate
-├── export/          # atomic CSV/XLSX + JSON summary
-├── analysis/        # review-quality lead scoring add-on
-└── server/          # FastAPI REST + Web UI
-docs/                 # ARCHITECTURE.md + OCI.md + responsible-use notes
-tests/                # pytest suite
-```
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and how
-this project stays independent.
+Original, self-contained code. Not derived from any other project.

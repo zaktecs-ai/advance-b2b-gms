@@ -1,62 +1,102 @@
-"""CLI entrypoints: run a scrape, or serve the REST API + Web UI."""
+"""CLI entrypoint: run a scrape (headless or headed via VNC), or demo mode.
+
+Usage:
+    python -m scraper.main                    # live scrape (config.yaml)
+    python -m scraper.main --demo             # offline sample records
+    python -m scraper.main --config other.yaml
+
+The engine is driven entirely by ``config.yaml`` + ``.env`` (a pure CLI /
+background execution model). The ``maps.headless: false`` + ``vnc.display``
+settings route the visible browser to a TightVNC display for manual CAPTCHA
+solving — exactly as on a VNC-enabled VPS.
+"""
 from __future__ import annotations
 
 import argparse
 import sys
 
 from .config import ConfigError, load_config
-from .maps.collector import DemoCollector, PlaywrightCollector
+from .maps.collector import DemoCollector, MapsCollector
 from .pipeline import Pipeline
 from .utils.logging_utils import setup_logging
 
 
-def _build_collector(config, demo: bool):
+def _build_collector(config, demo: bool, browser_manager):
     if demo:
         return DemoCollector()
     m = config.maps
-    return PlaywrightCollector(
-        hl=m.hl, gl=m.gl, headless=m.headless, zoom=m.zoom,
-        max_results=m.max_results_per_query, max_scrolls=m.max_scrolls,
-        scroll_pause=m.scroll_pause_seconds,
+    return MapsCollector(
+        browser_manager,
+        max_results_per_query=m.max_results_per_query or config.job.max_results_per_query,
+        max_total_results=m.max_total_results or config.job.max_total_results,
+        include_permanently_closed=m.include_permanently_closed,
+        scroll_delay=(m.scroll_delay_min_ms, m.scroll_delay_max_ms),
+        cooldown_seconds=config.delays.cooldown_seconds,
+        hl=m.hl, gl=m.gl,
+        maps_delay=(config.delays.maps_min_seconds, config.delays.maps_max_seconds),
     )
 
 
-def run(config_path: str, demo: bool, serve: bool) -> int:
+def run(config_path: str, demo: bool) -> int:
     try:
         config = load_config(config_path)
     except ConfigError as e:
         print(f"[config error] {e}", file=sys.stderr)
         return 1
 
-    log = setup_logging("INFO")
+    setup_logging("INFO")
 
-    if serve:
-        from .server.app import create_app
-        app = create_app(config)
-        import uvicorn
-        uvicorn.run(app, host="0.0.0.0", port=8000)
-        return 0
+    browser_manager = None
+    collector = None
+    if not demo:
+        # Build the Playwright-backed collector with a shared BrowserManager.
+        # BrowserManager is imported lazily so HTTP-only tests don't need it.
+        from .browser import BrowserManager, ProxyManager
+        proxy_cfg = ProxyManager().config
+        proxy_cfg.enabled = config.proxy.enabled
+        proxy_cfg.pool = list(config.proxy.pool or config.proxy.urls)
+        proxy_cfg.rotation = config.proxy.rotation
+        proxy_manager = ProxyManager(proxy_cfg)
 
-    collector = _build_collector(config, demo)
-    pipeline = Pipeline(config, collector)
+        m = config.maps
+        browser_manager = BrowserManager(
+            restart_after_queries=m.browser_restart_after_queries,
+            headless=m.headless,
+            proxy=proxy_manager.playwright_proxy(),
+            nav_timeout_ms=m.page_navigation_timeout_ms,
+            display=config.vnc.display if not m.headless else None,
+        )
+        collector = _build_collector(config, demo, browser_manager)
+
+    if collector is None:
+        collector = DemoCollector()
+
+    pipeline = Pipeline(config, collector=collector, browser_manager=browser_manager)
     try:
         counters = pipeline.run()
+    except KeyboardInterrupt:
+        print("interrupted — checkpoint state is durable; rerun to resume.",
+              file=sys.stderr)
+        return 130
     finally:
-        pass
+        if browser_manager is not None:
+            try:
+                browser_manager.close()
+            except Exception:
+                pass
 
-    log.info("Run complete: %s", counters)
     print(f"Done. Collected={counters['collected']} "
           f"Deduped={counters['deduped']} Filtered={counters['filtered']} "
           f"Committed={counters['committed']} Failed={counters['failed']}")
-    print(f"Output: {config.job.output_dir}/{config.job.client_name}/leads.csv")
+    print(f"Output: {pipeline.out_dir}/leads.xlsx")
     return 0
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="scraper", description="Advance B2B GMS")
+    parser = argparse.ArgumentParser(prog="abgms", description="Advance B2B GMS")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
-    parser.add_argument("--demo", action="store_true", help="Offline demo mode (sample records)")
-    parser.add_argument("--serve", action="store_true", help="Start the REST API + Web UI")
+    parser.add_argument("--demo", action="store_true",
+                        help="Offline demo mode (sample records, no browser)")
     parser.add_argument("--version", action="store_true", help="Print version and exit")
     args = parser.parse_args(argv)
 
@@ -65,7 +105,7 @@ def main(argv=None) -> int:
         print(__version__)
         return 0
 
-    return run(args.config, args.demo, args.serve)
+    return run(args.config, args.demo)
 
 
 if __name__ == "__main__":

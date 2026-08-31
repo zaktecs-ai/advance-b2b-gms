@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import deque
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -21,11 +20,10 @@ _GOAL_HINTS = ["mailto:", "contact", "book", "appointment", "facebook.com",
                "instagram.com", "linkedin.com"]
 
 
-def extract_links(html: str, base_url: str) -> list[str]:
+def extract_links(html: str, base_url: str) -> list:
     """Return absolute internal + external links from an HTML page."""
     soup = BeautifulSoup(html, "lxml")
-    links: list[str] = []
-    base_host = urlparse(base_url).netloc
+    links: list = []
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         if not href or href.startswith(("#", "javascript:", "tel:", "mailto:")):
@@ -45,10 +43,13 @@ def _priority(url: str) -> int:
 
 
 def _is_same_domain(url: str, base: str) -> bool:
-    return urlparse(url).netloc == urlparse(base).netloc
+    try:
+        return urlparse(url).netloc == urlparse(base).netloc
+    except ValueError:
+        return False
 
 
-def crawl_priority(html: str, base_url: str, max_pages: int = 10) -> list[str]:
+def crawl_priority(html: str, base_url: str, max_pages: int = 10) -> list:
     """Return a prioritized list of internal pages to visit (homepage first,
     then contact/about/services by hint order)."""
     links = extract_links(html, base_url)
@@ -58,7 +59,7 @@ def crawl_priority(html: str, base_url: str, max_pages: int = 10) -> list[str]:
 
 
 def crawl_sitemap_aware(sitemap_xml: str, base_url: str, keyword: str = "",
-                        max_pages: int = 15) -> list[str]:
+                        max_pages: int = 15) -> list:
     """Extract relevant URLs from a sitemap.xml, filtered by keyword/hints."""
     soup = BeautifulSoup(sitemap_xml, "lxml")
     urls = [loc.get_text().strip() for loc in soup.find_all("loc")]
