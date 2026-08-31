@@ -93,6 +93,7 @@ class PlaywrightCollector(Collector):
         self.max_scrolls = max_scrolls
         self.scroll_pause = scroll_pause
         self._browser = None
+        self._pw = None
 
     def _get_playwright(self):
         try:
@@ -105,8 +106,14 @@ class PlaywrightCollector(Collector):
             ) from e
 
     def _launch(self):
-        pw = self._get_playwright()()
-        self._browser = pw.chromium.launch(headless=self.headless)
+        sync_playwright = self._get_playwright()
+        # sync_playwright() returns a context manager; .start() gives the API.
+        self._pw = sync_playwright().start()
+        try:
+            self._browser = self._pw.chromium.launch(headless=self.headless)
+        except Exception:
+            self._pw.stop()
+            raise
         self._context = self._browser.new_context(
             locale=f"{self.hl}-{self.gl.upper()}",
             viewport={"width": 1280, "height": 900},
@@ -119,6 +126,11 @@ class PlaywrightCollector(Collector):
                 self._browser.close()
             finally:
                 self._browser = None
+        if getattr(self, "_pw", None) is not None:
+            try:
+                self._pw.stop()
+            finally:
+                self._pw = None
 
     def _search_url(self, query: str) -> str:
         base = MAPS_SEARCH_URL.format(query=quote_plus(query))
