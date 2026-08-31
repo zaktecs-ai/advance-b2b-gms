@@ -346,8 +346,8 @@ questions, and rating buckets.
 
 ### `Permission denied: ./run.sh`
 
-The repository normally stores both launcher scripts as executable. Fix a copy
-that lost its file permissions:
+If a clone or file transfer does not preserve the launcher permissions, fix
+both scripts with:
 
 ```bash
 chmod +x setup.sh run.sh
