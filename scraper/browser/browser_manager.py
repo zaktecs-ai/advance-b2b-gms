@@ -29,10 +29,14 @@ class BrowserManager:
     def __init__(self, restart_after_queries: int = 0, headless: bool = True,
                  proxy: dict | None = None, nav_timeout_ms: int = 30_000,
                  display: str | None = None, locale: str = "en-US",
-                 user_agent: str | None = None):
+                 user_agent: str | None = None, proxy_manager=None):
         self._restart_after_queries = restart_after_queries
         self._headless = headless
         self._proxy = proxy
+        # A ProxyManager triggers per-context proxy resolution (A2): instead of
+        # freezing one proxy at launch, every new context re-resolves so the
+        # round-robin/random pool actually rotates across queries.
+        self._proxy_manager = proxy_manager
         self._nav_timeout_ms = nav_timeout_ms
         self._display = display
         self._locale = locale
@@ -45,6 +49,8 @@ class BrowserManager:
         self._browser = None
         self._queries_processed = 0
         self._lock = threading.Lock()
+        # The proxy most recently handed to a context, for failure feedback (A3).
+        self._active_proxy: str | None = None
 
     # ------------------------------------------------------------------
     def _ensure_browser(self):
@@ -103,7 +109,16 @@ class BrowserManager:
                     geolocation: dict | None = None,
                     locale: str | None = None):
         browser = self._ensure_browser()
-        ctx_proxy = proxy or self._proxy
+        # Per-context proxy resolution: prefer an explicit arg, then a fresh
+        # rotation from the ProxyManager (A2), falling back to the frozen
+        # launch-time proxy only when neither is present.
+        ctx_proxy = proxy
+        if ctx_proxy is None and self._proxy_manager is not None:
+            ctx_proxy = self._proxy_manager.playwright_proxy()
+        if ctx_proxy is None:
+            ctx_proxy = self._proxy
+        if ctx_proxy:
+            self._active_proxy = ctx_proxy.get("server") if isinstance(ctx_proxy, dict) else str(ctx_proxy)
         kwargs = {
             "viewport": {"width": 1366, "height": 900},
             "locale": locale or self._locale,
@@ -115,6 +130,11 @@ class BrowserManager:
             kwargs["geolocation"] = geolocation
             kwargs["permissions"] = ["geolocation"]
         return browser.new_context(**kwargs)
+
+    def report_proxy_failure(self) -> None:
+        """Report the active proxy as failed so it drops out of rotation (A3)."""
+        if self._proxy_manager is not None and self._active_proxy:
+            self._proxy_manager.report_failure(self._active_proxy)
 
     @property
     def nav_timeout_ms(self) -> int:

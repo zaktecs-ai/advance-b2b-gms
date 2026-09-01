@@ -7,6 +7,8 @@ taxonomy so 'blocked' is never conflated with 'dead'.
 from __future__ import annotations
 
 import logging
+import socket
+import ssl
 from dataclasses import dataclass
 
 import httpx
@@ -40,15 +42,39 @@ def _classify(exc: Exception) -> str:
     if isinstance(exc, (httpx.ConnectTimeout, httpx.ReadTimeout)):
         return FailureReason.TIMEOUT
     if isinstance(exc, httpx.ConnectError):
+        # Walk the cause chain first: a socket.gaierror means DNS failure, a
+        # ssl.SSLError means TLS failure — both portable across platforms,
+        # unlike matching OS-specific error text.
+        cause = exc
+        while cause is not None:
+            if isinstance(cause, socket.gaierror):
+                return FailureReason.DNS_FAILURE
+            if isinstance(cause, ssl.SSLError):
+                return FailureReason.TLS_ERROR
+            cause = cause.__cause__ or cause.__context__
+        if isinstance(exc, httpx.ConnectTimeout):
+            return FailureReason.TIMEOUT
         msg = str(exc)
-        if "Name or service not known" in msg or "getaddrinfo" in msg:
+        if _DNS_TEXT_PATTERNS_ANY(msg):
             return FailureReason.DNS_FAILURE
         return FailureReason.CONNECTION_REFUSED
-    if isinstance(exc, httpx.SSLError):
-        return FailureReason.TLS_ERROR
     if "too many redirects" in name.lower():
         return FailureReason.UNKNOWN
     return FailureReason.UNKNOWN
+
+
+# A widened string fallback for cases where no socket.gaierror is preserved in
+# the cause chain. Covers the platform-specific phrasings.
+_DNS_TEXT_MARKERS = (
+    "name or service not known", "getaddrinfo", "nodename nor servname",
+    "name does not resolve", "temporary failure in name resolution",
+    "no address associated with hostname",
+)
+
+
+def _DNS_TEXT_PATTERNS_ANY(msg: str) -> bool:
+    low = (msg or "").lower()
+    return any(m in low for m in _DNS_TEXT_MARKERS)
 
 
 def _status_reason(status: int) -> str | None:

@@ -3,12 +3,14 @@
 Extraction sources (priority order, per page):
   1. mailto: links
   2. JSON-LD / microdata structured data
-  3. inline <script> blocks (obfuscated addresses)
-  4. visible HTML text
-  5. rendered DOM text (supplied by the Playwright path)
+  3. visible HTML text (testimonials/comments/excluded sections removed)
+  4. rendered DOM text (supplied by the Playwright path)
 
-Cleaning decodes obfuscation (``[at]``, ``[dot]``, ``&#64;``) and rejects
-disposable/placeholder/asset junk, with domain-relationship filtering.
+Inline ``<script>`` bodies (GA4/GTM config, Sentry DSNs) and testimonial text are
+NOT mined: they are the dominant source of tracking-vendor and third-party-PII
+false positives. Cleaning decodes obfuscation (``[at]``, ``[dot]``, ``&#64;``)
+and rejects disposable/placeholder/asset/vendor junk, with domain-relationship
+filtering.
 """
 from __future__ import annotations
 
@@ -72,12 +74,16 @@ def extract_emails(html: str | None, rendered_text: str = "", url: str = "") -> 
                 add([href[7:].split("?")[0]])
         for script in soup.find_all("script", type="application/ld+json"):
             add(extract_emails_from_text(script.get_text()))
-        for script in soup.find_all("script"):
-            if not script.get("src"):
-                add(extract_emails_from_text(script.get_text()))
+        # Remove testimonial/review/author sections and figure captions before
+        # reading visible text, so a customer's or reviewer's personal address
+        # is never harvested as the business's contact email.
+        for tag in soup.select(
+            ".testimonial,.review,.reviews,.review-body,.testimonials,"
+            "blockquote,figcaption,.comment,.comments,.wp-block-comment,"
+            ".quote,.author"
+        ):
+            tag.decompose()
         add(extract_emails_from_text(soup.get_text(" ")))
-        for m in re.finditer(r"mailto:([^\"'>\s]+)", html, re.I):
-            add([m.group(1).split("?")[0]])
 
     if rendered_text:
         add(extract_emails_from_text(rendered_text))

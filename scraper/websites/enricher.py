@@ -123,7 +123,9 @@ class Enricher:
                           technologies=tech_set)
         signals, _ = self._signals.run(ctx)
         if self._decision_makers:
-            decision_maker_name, decision_maker_title = extract_decision_maker(combined_text)
+            decision_maker_name, decision_maker_title = extract_decision_maker(
+                self._strip_testimonials(combined_html)
+            )
         else:
             decision_maker_name, decision_maker_title = "", ""
 
@@ -165,6 +167,27 @@ class Enricher:
             return BeautifulSoup(html, "lxml").get_text(" ")
         except Exception:
             return html or ""
+
+    @staticmethod
+    def _strip_testimonials(html: str) -> str:
+        """Return page text with testimonial/review/author nodes removed.
+
+        This mirrors ``email/extract.py``'s source-context scoping so a
+        testimonial author ("…President of the local rotary club") is never
+        mistaken for the business's own decision maker (B3).
+        """
+        from bs4 import BeautifulSoup
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except Exception:
+            return html or ""
+        for tag in soup.select(
+            ".testimonial,.review,.reviews,.review-body,.testimonials,"
+            "blockquote,figcaption,.comment,.comments,.wp-block-comment,"
+            ".quote,.author,cite"
+        ):
+            tag.decompose()
+        return soup.get_text(" ")
 
     @staticmethod
     def _extract_scripts(html: str) -> list[str]:

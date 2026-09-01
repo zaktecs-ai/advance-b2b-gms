@@ -62,3 +62,20 @@ def test_classify_open_closed():
     assert classify_open_status("Open now") == "Open"
     assert classify_open_status("Closed") == "Closed"
     assert classify_open_status("") == "N/A"
+
+
+def test_rating_comma_decimal():
+    # A9: European locale renders ratings with a comma decimal separator.
+    r, c = parse_rating_reviews("4,8 (365)")
+    assert r == 4.8 and c == 365
+
+
+def test_argentine_postal_requires_full_cpa():
+    # A7: a bare 4-digit AU/NZ-style postcode must NOT be inferred as Argentina.
+    au = decompose_address("10 Hay St, Perth WA 6000")
+    assert au["country"] != "AR"
+    nz = decompose_address("12 Queen St, Auckland 1010")
+    assert nz["country"] != "AR"
+    ar = decompose_address("Av. Corrientes 1234, Buenos Aires, A1234ABC")
+    assert ar["postal_code"] == "A1234ABC"
+    assert ar["country"] == "AR"

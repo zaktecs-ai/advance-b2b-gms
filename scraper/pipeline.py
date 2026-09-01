@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .analysis.engine import analyze
@@ -72,6 +73,7 @@ class Pipeline:
         self.out_dir = out_dir
         self.checkpoint = CheckpointStore(out_dir / "checkpoint.sqlite")
         self.csv = AtomicCSVWriter(out_dir / "leads.csv", OUTPUT_COLUMNS)
+        self._reconcile_csv_with_checkpoint()
         seeds = self.checkpoint.seed_sets()
         self.resolver = IdentityResolver(
             seen_identities=seeds["identities"],
@@ -88,6 +90,7 @@ class Pipeline:
             timeout=config.smtp.verification_timeout_seconds,
             from_email=config.smtp.from_email,
             retries=config.smtp.retries,
+            max_workers=config.smtp.workers,
         )
 
         max_pages = config.website.max_pages_per_site
@@ -107,6 +110,8 @@ class Pipeline:
             model=config.ai_hook.model,
             api_key_env=config.ai_hook.api_key_env,
             timeout=config.ai_hook.timeout_seconds,
+            max_calls=config.ai_hook.max_calls,
+            retries=config.ai_hook.retries,
         )
 
         self.pre_filters, self.post_filters = split_filters(
@@ -115,6 +120,28 @@ class Pipeline:
         self.polygons = geojson_polygons(config.geo.polygons) if config.geo.polygons else []
         self.counters = {"collected": 0, "deduped": 0, "filtered": 0,
                          "committed": 0, "failed": 0}
+
+    def _reconcile_csv_with_checkpoint(self) -> None:
+        """Trim CSV rows that were durably written but never committed.
+
+        A crash between ``csv.append`` and ``checkpoint.mark_committed`` leaves
+        a well-formed CSV row with no committed marker. On startup the
+        checkpoint's committed count is the authority for how many CSV rows are
+        valid; any uncommitted tail row is trimmed so the same business is
+        cleanly re-collected (and dedup-seeded) on this run.
+        """
+        try:
+            committed = self.checkpoint.committed_count()
+        except Exception as e:  # noqa: BLE001 — a broken checkpoint must not abort startup
+            log.warning("checkpoint count failed; skipping reconcile: %s", e)
+            return
+        if self.csv.row_count > committed:
+            log.warning(
+                "reconciling CSV: %d rows written but only %d committed — "
+                "trimming %d uncommitted tail row(s)",
+                self.csv.row_count, committed, self.csv.row_count - committed,
+            )
+            self.csv.truncate_to(committed)
 
     # -- collection ----------------------------------------------------------
     def run(self) -> dict:
@@ -144,6 +171,11 @@ class Pipeline:
     def _process_query(self, query: str) -> None:
         keyword = self._split_keyword(query)
         self._query_collected = 0
+        workers = max(1, self.cfg.concurrency.website_workers)
+        # Bound the in-flight batch so memory stays flat regardless of how many
+        # listings a query yields; the batch is drained in serial order.
+        max_batch = workers * 4
+        batch: list[tuple[dict, dict]] = []
         for raw in self.collector.collect(query):
             self.counters["collected"] += 1
             self._query_collected += 1
@@ -154,7 +186,87 @@ class Pipeline:
             pos = (raw or {}).get("_position") or self._query_collected
             total = (raw or {}).get("_total") or 0
             self._progress.business_collected(pos, name, total)
-            self._process_record(rec, query)
+            prepared = self._dedup_and_prefilter(rec, query)
+            if prepared is None:
+                continue
+            batch.append(prepared)
+            if len(batch) >= max_batch:
+                self._drain_batch(batch, query, workers)
+                batch = []
+        if batch:
+            self._drain_batch(batch, query, workers)
+
+    def _dedup_and_prefilter(self, rec: dict, query: str) -> tuple[dict, dict] | None:
+        """Serial pass: assign id, dedup, and run pre-enrichment filters.
+
+        Returns ``(rec, sig)`` for records that proceed to enrichment, or None
+        for duplicates / pre-filter rejects (already counted + rolled back).
+        """
+        record_id = _make_record_id(rec)
+        rec["record_id"] = record_id
+        is_dup, _, sig = self.resolver.is_duplicate(rec)
+        if is_dup:
+            self.counters["deduped"] += 1
+            self._progress.business_dup()
+            return None
+        keep, _ = evaluate(rec, self.pre_filters)
+        if not keep:
+            self.resolver.rollback(rec)
+            self.counters["filtered"] += 1
+            self._progress.business_filtered()
+            return None
+        return rec, sig
+
+    def _drain_batch(self, batch: list[tuple[dict, dict]], query: str, workers: int) -> None:
+        """Enrich in parallel (I/O-bound), then filter/commit serially in order.
+
+        The dedup resolver, checkpoint, and CSV writer are NOT thread-safe, so
+        only the fetch/enrich/analyze/LLM stage is parallelized; everything that
+        mutates shared state stays on this single thread.
+        """
+        recs = [r for r, _ in batch]
+        if workers > 1 and len(recs) > 1:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                list(ex.map(self._enrich_and_stage, recs))
+        else:
+            for rec in recs:
+                self._enrich_and_stage(rec)
+        for rec, sig in batch:
+            self._commit_stage(rec, query, sig)
+
+    def _enrich_and_stage(self, rec: dict) -> None:
+        """Parallel-safe, record-local mutation: enrich + analyze + LLM hook.
+
+        The shared ``Enricher`` uses an httpx.Client (thread-safe for concurrent
+        requests); MX/SMTP and the LLM hook guard their own shared state, so
+        concurrent calls only touch their own ``rec`` dict.
+        """
+        website = rec.get("website")
+        self._enrich(rec, website)
+        self._analyze(rec)
+        self._apply_llm_hook(rec)
+
+    def _commit_stage(self, rec: dict, query: str, sig: dict) -> None:
+        """Serial pass: post-enrichment filters, quality gate, then commit."""
+        keep2, freason2 = evaluate(rec, self.post_filters)
+        if not keep2:
+            self.resolver.rollback(rec)
+            self.counters["filtered"] += 1
+            self._progress.business_filtered()
+            rec["filtered_out_reason"] = freason2
+            return
+        if not passes_quality(rec):
+            self.resolver.rollback(rec)
+            self.counters["failed"] += 1
+            return
+        row = {c: rec.get(c, "N/A") for c in OUTPUT_COLUMNS}
+        idx = self.csv.append(row)
+        self.checkpoint.register_record(
+            record_id=rec["record_id"], identity_key=sig.get("identity_key", ""),
+            sig=sig, source_query=query, raw=rec)
+        self.checkpoint.mark_committed(rec["record_id"], idx)
+        self.counters["committed"] += 1
+        self._progress.business_saved()
 
     @staticmethod
     def _split_keyword(query: str) -> str:
@@ -189,56 +301,6 @@ class Pipeline:
             ):
                 return None
         return rec
-
-    def _process_record(self, rec: dict, query: str) -> None:
-        record_id = _make_record_id(rec)
-        rec["record_id"] = record_id
-        is_dup, _, sig = self.resolver.is_duplicate(rec)
-        if is_dup:
-            self.counters["deduped"] += 1
-            self._progress.business_dup()
-            return
-
-        # Pass 1: pre-enrichment filters.
-        keep, _ = evaluate(rec, self.pre_filters)
-        if not keep:
-            self.resolver.rollback(rec)
-            self.counters["filtered"] += 1
-            self._progress.business_filtered()
-            return
-
-        # Enrich website (HTTP-first; multi-page; signals; social).
-        website = rec.get("website")
-        self._enrich(rec, website)
-
-        # Review analysis (offline add-on; collector supplies review texts).
-        self._analyze(rec)
-
-        # LLM personalized pitch hook (auto-falls back to rule-based).
-        self._apply_llm_hook(rec)
-
-        # Pass 2: post-enrichment filters.
-        keep2, freason2 = evaluate(rec, self.post_filters)
-        if not keep2:
-            self.resolver.rollback(rec)
-            self.counters["filtered"] += 1
-            self._progress.business_filtered()
-            rec["filtered_out_reason"] = freason2
-            return
-
-        if not passes_quality(rec):
-            self.resolver.rollback(rec)
-            self.counters["failed"] += 1
-            return
-
-        # Commit: append CSV, then advance checkpoint.
-        row = {c: rec.get(c, "N/A") for c in OUTPUT_COLUMNS}
-        idx = self.csv.append(row)
-        self.checkpoint.register_record(
-            record_id, sig.get("identity_key", ""), sig, query, rec)
-        self.checkpoint.mark_committed(record_id, idx)
-        self.counters["committed"] += 1
-        self._progress.business_saved()
 
     def _enrich(self, rec: dict, website) -> None:
         if website in (None, "N/A", ""):

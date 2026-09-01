@@ -34,6 +34,9 @@ class ProxyConfig:
         return self
 
 
+_FAILURE_THRESHOLD = 3
+
+
 class ProxyManager:
     """Central proxy resolver shared by httpx and Playwright clients."""
 
@@ -41,23 +44,52 @@ class ProxyManager:
         self.config = config or ProxyConfig()
         self._idx = 0
         self._lock = threading.Lock()
+        # Per-proxy consecutive-failure counters for eviction (A3).
+        self._failures: dict[str, int] = {}
 
     @property
     def enabled(self) -> bool:
         return self.config.enabled
 
     def resolve(self) -> str | None:
-        """Return a single proxy URL for the current operation (rotation-aware)."""
+        """Return a single proxy URL for the current operation (rotation-aware).
+
+        Healthy proxies are preferred; a member above the failure threshold is
+        skipped unless every member is unhealthy (then the full pool is
+        available again rather than dead-locking the run).
+        """
         if not self.enabled:
             return None
         if self.config.pool:
+            pool = self.config.pool
             with self._lock:
                 if self.config.rotation == "random":
-                    return random.choice(self.config.pool)
-                proxy = self.config.pool[self._idx % len(self.config.pool)]
+                    healthy = [p for p in pool
+                               if self._failures.get(p, 0) < _FAILURE_THRESHOLD]
+                    candidate = healthy or pool
+                    return random.choice(candidate)
+                # round_robin over healthy members; fall back to full pool.
+                healthy = [p for p in pool
+                           if self._failures.get(p, 0) < _FAILURE_THRESHOLD]
+                candidate = healthy or pool
+                proxy = candidate[self._idx % len(candidate)]
                 self._idx += 1
                 return proxy
         return self.config.https or self.config.http
+
+    def report_failure(self, proxy: str | None) -> None:
+        """Record a failed attempt so a dead proxy drops out of rotation."""
+        if not proxy:
+            return
+        with self._lock:
+            self._failures[proxy] = self._failures.get(proxy, 0) + 1
+
+    def report_success(self, proxy: str | None) -> None:
+        """Reset a proxy's failure counter after a successful use."""
+        if not proxy:
+            return
+        with self._lock:
+            self._failures[proxy] = 0
 
     def httpx_proxy(self) -> str | None:
         """Proxy URL suitable for httpx's ``proxy=`` argument."""

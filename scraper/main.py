@@ -75,7 +75,7 @@ def run(config_path: str, demo: bool) -> int:
         browser_manager = BrowserManager(
             restart_after_queries=m.browser_restart_after_queries,
             headless=m.headless,
-            proxy=proxy_manager.playwright_proxy(),
+            proxy_manager=proxy_manager,
             nav_timeout_ms=m.page_navigation_timeout_ms,
             display=config.vnc.display if not m.headless else None,
         )

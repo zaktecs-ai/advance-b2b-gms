@@ -73,7 +73,9 @@ _POSTAL_PATTERNS = {
     "IE": re.compile(r"\b[A-Z]\d{2}[ -]?[A-Z0-9]{4}\b", re.I),
     "PT": re.compile(r"\b\d{4}-\d{3}\b"),
     "BR": re.compile(r"\b\d{5}-\d{3}\b"),
-    "AR": re.compile(r"\b[A-Z]?\d{4}[A-Z]{0,3}\b", re.I),
+    # Argentine CPA is distinctive (A1234ABC); a bare 4-digit run is ambiguous
+    # with AU/NZ postcodes and must not be used to *infer* AR in the fallback.
+    "AR": re.compile(r"\b[A-Z]\d{4}[A-Z]{3}\b", re.I),
     "AU": re.compile(r"\b\d{4}\b"),
     "NZ": re.compile(r"\b\d{4}\b"),
     "JP": re.compile(r"\b\d{3}-\d{4}\b"),
@@ -100,10 +102,10 @@ def parse_rating_reviews(header_text: str | None) -> tuple[float | None, int | N
     if not header_text:
         return (None, None)
     rating = None
-    m = re.search(r"\b([1-5]\.\d)\b", header_text)
+    m = re.search(r"\b([1-5][.,]\d)\b", header_text)
     if m:
         try:
-            rating = float(m.group(1))
+            rating = float(m.group(1).replace(",", "."))
         except ValueError:
             rating = None
     count = None

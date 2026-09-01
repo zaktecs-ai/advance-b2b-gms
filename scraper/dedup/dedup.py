@@ -82,7 +82,12 @@ def resolve_identity(record: dict, default_country: str = "US") -> dict:
         signals["key_type"] = "none"
 
     composite = "|".join(key_parts)
-    signals["identity_key"] = hashlib.sha1(composite.encode("utf-8")).hexdigest() if composite else ""
+    # SHA1 is used only to build a non-secret internal dedup fingerprint — never
+    # for authentication or signing — so it is explicitly marked as such.
+    signals["identity_key"] = (
+        hashlib.sha1(composite.encode("utf-8"), usedforsecurity=False).hexdigest()
+        if composite else ""
+    )
     return signals
 
 

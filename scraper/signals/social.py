@@ -2,11 +2,15 @@
 
 A URL is matched to exactly one platform by its host, so a Facebook URL can
 never land in the Instagram column.
+
+A URL is only treated as a *profile* when both its host AND its path look like
+a genuine handle. Share dialogs, intent/tweet actions, tracking redirects,
+pixels, and embed URLs are rejected so they never populate an export column.
 """
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 _PLATFORM_HOSTS = {
     "facebook": r"(^|\.)facebook\.com$",
@@ -20,18 +24,63 @@ _PLATFORM_HOSTS = {
     "snapchat": r"(^|\.)snapchat\.com$",
 }
 
+# Redirect/tracking wrapper hosts that are never a real profile handle.
+_REDIRECT_HOSTS = {
+    "l.facebook.com", "lm.facebook.com", "lnkd.in", "t.co", "bit.ly",
+}
+
+# Path substrings that always mark an action/redirect/embed/pixel URL, not a
+# profile. Present on any of a platform's official domains, regardless of which
+# platform the final host match belongs to.
+_REJECT_PATH_SUBSTR = (
+    "/sharer", "/share", "/sharing/", "/intent/", "/plugins/", "/dialog/",
+    "/l.php", "/tr", "/watch", "/embed", "/pin/create", "/pages/",
+    "/login", "/signup", "/accounts/", "/redirect", "/u/0/",
+)
+
+# Per-platform profile-path shapes. A real handle is a short segment of
+# username-legal characters; a bare root or a well-known non-handle path is not.
+_PROFILE_PATH = {
+    "facebook": re.compile(r"^/(?!sharer|plugins|tr|pages|groups|watch|events|marketplace|photo|videos|story|reel)[A-Za-z0-9.\-]{1,}/?$"),
+    "instagram": re.compile(r"^/(?!p/|reel|stories|explore|accounts|tv/)[A-Za-z0-9._]{1,}/?$"),
+    "linkedin": re.compile(r"^/(?:company|school|in)/[A-Za-z0-9%_.\-]+/?$"),
+    "youtube": re.compile(r"^/(?:@|c/|channel/|user/)[A-Za-z0-9_.\-]+/?$"),
+    "twitter_x": re.compile(r"^/(?!intent|share|home|search|explore|messages|settings|i/)[A-Za-z0-9_]{1,15}/?$"),
+    "tiktok": re.compile(r"^/@[A-Za-z0-9_.\-]+/?$"),
+    "pinterest": re.compile(r"^/[A-Za-z0-9_.\-]{1,}/?$"),
+    "github": re.compile(r"^/[A-Za-z0-9_.\-]{1,39}/?$"),
+    "snapchat": re.compile(r"^/add/[A-Za-z0-9_.\-]+/?$"),
+}
+
 
 def platform_for_url(url: str) -> str | None:
-    """Return the platform key for a URL, or None if not a social profile."""
+    """Return the platform key for a URL, or None if not a social profile.
+
+    Classification requires BOTH a social host AND a genuine-looking profile
+    path. Share/redirect/embed/tracking URLs are rejected so the first URL seen
+    per platform (often a junk widget) can no longer beat the real link.
+    """
     if not url:
         return None
     try:
-        host = (urlparse(url).hostname or "").lower()
+        parts = urlsplit(url)
     except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if not host:
+        return None
+    if host in _REDIRECT_HOSTS:
+        return None
+    path = parts.path or "/"
+    low_path = path.lower()
+    if any(s in low_path for s in _REJECT_PATH_SUBSTR):
         return None
     for platform, pattern in _PLATFORM_HOSTS.items():
         if re.search(pattern, host):
-            return platform
+            prof_re = _PROFILE_PATH.get(platform)
+            if prof_re is None:
+                return None
+            return platform if prof_re.match(path) else None
     return None
 
 

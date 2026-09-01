@@ -81,6 +81,25 @@ def _any_src(scripts, pattern):
     return False, None
 
 
+def _any_src_or_html(scripts, html, pattern):
+    """Match a script-`src` URL in either the extracted scripts or the HTML.
+
+    The pattern is a resource-URL token (e.g. ``googletagmanager.com/gtag/js``)
+    that appears in a real ``<script src=...>`` but not in ordinary prose, so
+    anchoring detection here avoids false-YES on brand name-drops.
+    """
+    hit, ev = _any_src(scripts, pattern)
+    if hit:
+        return True, ev
+    m = re.search(
+        r"<script\b[^>]*\bsrc\s*=\s*['\"]([^'\"]*(?:"
+        + pattern
+        + r")[^'\"]*)['\"]",
+        html or "", re.I,
+    )
+    return (True, m.group(1)) if m else (False, None)
+
+
 def _meta_pixel(ctx):
     hit, ev = _any_src(ctx.scripts, r"connect\.facebook\.net|facebook\.com/tr|fbq\(")
     if hit:
@@ -91,55 +110,69 @@ def _meta_pixel(ctx):
 
 
 def _ga4(ctx):
-    if re.search(r"gtag\(|googletagmanager\.com/gtag|G-[A-Z0-9]{6,}", ctx.html, re.I):
-        return True, "GA4/gtag measurement script detected"
-    hit, ev = _any_src(ctx.scripts, r"googletagmanager\.com/gtag|google-analytics\.com")
-    return (True, ev) if hit else (False, None)
+    hit, ev = _any_src_or_html(ctx.scripts, ctx.html, r"googletagmanager\.com/gtag/js|google-analytics\.com/(analytics|ga)\.js")
+    if hit:
+        return True, ev or "GA4/gtag measurement script detected"
+    # Only an explicit config call or measurement id counts — NOT a prose
+    # mention of "gtag()" in a blog post.
+    if re.search(r"gtag\(\s*['\"]config['\"]|G-[A-Z0-9]{8,10}\b", ctx.html):
+        return True, "GA4 config detected"
+    return False, None
 
 
 def _gtm(ctx):
-    hit, ev = _any_src(ctx.scripts, r"googletagmanager\.com/gtm\.js")
+    hit, ev = _any_src_or_html(ctx.scripts, ctx.html, r"googletagmanager\.com/gtm\.js")
     if hit:
         return True, ev or "Google Tag Manager script detected"
-    if re.search(r"googletagmanager\.com/gtm\.js|GTM-[A-Z0-9]+", ctx.html, re.I):
-        return True, "Google Tag Manager detected"
+    if re.search(r"GTM-[A-Z0-9]{6,}\b", ctx.html):
+        return True, "Google Tag Manager container detected"
     return False, None
 
 
 def _booking(ctx):
     booking_domains = re.compile(
-        r"calendly\.com|acuityscheduling\.com|booksy\.com|mindbodyonline\.com|"
-        r"vagaro\.com|fresha\.com|setmore\.com|appointy\.com|square\.up/site|"
-        r"youcanbook\.me|simplybook\.me|schedulicity\.com", re.I)
-    hay = ctx.text + "\n" + "\n".join(ctx.urls) + "\n" + ctx.html
+        r"(?:calendly\.com|acuityscheduling\.com|booksy\.com|"
+        r"mindbodyonline\.com|vagaro\.com|fresha\.com|setmore\.com|appointy\.com|"
+        r"youcanbook\.me|simplybook\.me|schedulicity\.com)(?:/[^\s\"'<>]*)", re.I)
+    hay = "\n".join(ctx.urls) + "\n" + ctx.html
     m = booking_domains.search(hay)
     return (True, m.group(0)) if m else (False, None)
 
 
 def _chat_widget(ctx):
-    if re.search(r"tawk\.to|intercom|drift\.com|livechatinc\.com|zopim|crisp\.chat|"
-                 r"hubspot\.com/forms|chat-widget|freshchat|zendesk", ctx.html, re.I):
-        return True, "chat widget detected"
-    hit, ev = _any_src(ctx.scripts, r"tawk\.to|intercom|drift|livechat|zopim|crisp\.chat|hubspot")
-    return (True, ev) if hit else (False, None)
+    hit, ev = _any_src_or_html(ctx.scripts, ctx.html,
+        r"tawk\.to|intercom|drift|livechatinc|zopim|crisp\.chat|freshchat|hubspot\.com/forms")
+    if hit:
+        return True, ev or "chat widget script detected"
+    return False, None
 
 
 def _analytics(ctx):
-    if re.search(r"google-analytics|analytics\.js|segment\.com|mixpanel|hotjar|matomo|"
-                 r"clarity\.ms", ctx.html, re.I):
-        return True, "analytics script detected"
+    hit, ev = _any_src_or_html(ctx.scripts, ctx.html,
+        r"google-analytics\.com/(analytics|ga)\.js|segment\.com/analytics|static\.hotjar\.com|clarity\.ms/tag")
+    if hit:
+        return True, ev or "analytics script detected"
+    if re.search(r"mixpanel\.init\(|matomo|_paq\.push", ctx.html):
+        return True, "analytics init detected"
     return False, None
 
 
 def _advertising(ctx):
-    """Ad-spend intent: Meta Pixel, Google Ads, or display/ad tags."""
-    if re.search(r"fbq\(|facebook\.com/tr|connect\.facebook\.net", ctx.html, re.I):
-        return True, "meta pixel (ad) detected"
-    if re.search(r"doubleclick|adsbygoogle|googlesyndication|googleadservices|"
-                 r"taboola|outbrain", ctx.html, re.I):
+    """Ad-spend intent: Meta Pixel, Google Ads, or display/ad tags.
+
+    GTM is intentionally NOT ad-spend evidence on its own (it is a tag
+    container, not an ad purchase). Detection is anchored to script sources and
+    explicit init calls, never to a prose brand mention.
+    """
+    if re.search(r"fbq\(\s*['\"]init['\"]", ctx.html):
+        return True, "meta pixel init detected"
+    if re.search(r"adsbygoogle\s*=|googlesyndication\.com|doubleclick\.net", ctx.html):
         return True, "ad network tag detected"
-    hit, ev = _any_src(ctx.scripts, r"doubleclick|adsbygoogle|googletagmanager|facebook\.net")
-    return (True, ev) if hit else (False, None)
+    hit, ev = _any_src_or_html(ctx.scripts, ctx.html,
+        r"doubleclick\.net|adsbygoogle\.js|connect\.facebook\.net.*fbevents|connect\.facebook\.net")
+    if hit:
+        return True, ev or "ad network script detected"
+    return False, None
 
 
 def _kw_signal(ctx, keywords):
@@ -204,15 +237,30 @@ _TITLE_PATTERN = (
     r"Managing Director|Principal|Partner|Manager|Director|Proprietor"
 )
 _TITLE_RE = re.compile(rf"\b({_TITLE_PATTERN})\b", re.I)
+# The name portion is deliberately case-SENSITIVE (title-case tokens) so that
+# lowercase prose ("led by", "terms of service") is never captured as a name.
 _NAME_RE = re.compile(
     r"\b(?:[A-ZÀ-ÖØ-Ý][\w'’.-]*)(?:\s+[A-ZÀ-ÖØ-Ý][\w'’.-]*){1,3}\b"
 )
 _NAME_TITLE_RE = re.compile(
-    rf"(?P<name>{_NAME_RE.pattern})\s*[,;:\-–—]\s*"
+    rf"(?P<name>(?-i:{_NAME_RE.pattern}))\s*[,;:\-–—]\s*"
     rf"(?P<title>{_TITLE_PATTERN})\b|"
-    rf"(?P<title_before>{_TITLE_PATTERN})\s*[,;:\-–—:]\s*(?P<name_after>{_NAME_RE.pattern})",
+    rf"(?P<title_before>{_TITLE_PATTERN})\s*[,;:\-–—:]\s*(?P<name_after>(?-i:{_NAME_RE.pattern}))|"
+    rf"(?P<title_spaced>{_TITLE_PATTERN})\s+(?P<name_spaced>(?-i:{_NAME_RE.pattern}))",
     re.I,
 )
+
+
+_NAME_STOPWORDS = {
+    "terms", "term", "service", "services", "privacy", "policy", "policies",
+    "home", "about", "contact", "team", "story", "our", "founder", "street",
+    "suite", "menu", "follow", "share", "tweet", "copyright", "reserved",
+    "rights", "the", "and", "or", "with", "from", "for", "your", "this",
+    "that", "overview", "managing", "director", "principal", "manager",
+    "owner", "president", "partner", "ceo", "more", "read", "view", "see",
+    "back", "top", "next", "previous", "sign", "log", "account", "click",
+    "here", "learn", "book", "get", "now", "today", "news", "blog", "media",
+}
 
 
 def _clean_person_name(value: str) -> str:
@@ -225,31 +273,42 @@ def _clean_person_name(value: str) -> str:
     return cleaned.strip(" ,;:-–—") or "N/A"
 
 
+def _looks_like_person(name: str) -> bool:
+    """Reject boilerplate/place/nav text that merely looks name-shaped."""
+    if not name or name == "N/A":
+        return False
+    toks = [t for t in name.split() if t]
+    if not (2 <= len(toks) <= 4):
+        return False
+    for t in toks:
+        word = re.sub(r"[^\wÀ-ÖØ-öø-ÿ]", "", t)
+        if not word:
+            return False
+        if word.lower() in _NAME_STOPWORDS:
+            return False
+        if not re.match(r"^[A-ZÀ-ÖØ-Ý]", t):
+            return False
+    return True
+
+
 def extract_decision_maker(text: str) -> tuple[str, str]:
-    """Return the first high-confidence ``(name, title)`` pair."""
+    """Return the first validated ``(name, title)`` pair, or (``""``, ``""``)."""
     cleaned = normalize_text(text)
     if cleaned == "N/A":
         return "", ""
 
-    match = _NAME_TITLE_RE.search(cleaned)
-    if match:
-        name = match.group("name") or match.group("name_after") or ""
-        title = match.group("title") or match.group("title_before") or ""
+    # Scan ALL name+title matches; accept the first with a genuine human name.
+    for match in _NAME_TITLE_RE.finditer(cleaned):
+        name = (match.group("name") or match.group("name_after")
+                or match.group("name_spaced") or "")
+        title = (match.group("title") or match.group("title_before")
+                 or match.group("title_spaced") or "")
         name = _clean_person_name(name)
         title = normalize_text(title)
-        if name != "N/A" and title != "N/A":
+        if name != "N/A" and title != "N/A" and _looks_like_person(name):
             return name, title
 
-    title_match = _TITLE_RE.search(cleaned)
-    if not title_match:
-        return "", ""
-    title = normalize_text(title_match.group(1))
-    before = cleaned[max(0, title_match.start() - 80): title_match.start()]
-    after = cleaned[title_match.end(): title_match.end() + 80]
-    for candidate in (after, before):
-        name_match = _NAME_RE.search(candidate)
-        if name_match:
-            name = _clean_person_name(name_match.group(0))
-            if name != "N/A":
-                return name, title
+    # A standalone title with no adjacent validated name is not a decision
+    # maker. The loose 80-char-window fallback previously fabricated people
+    # from nav/footer boilerplate ("Terms Of Service. Our..."), so it is gone.
     return "", ""

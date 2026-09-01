@@ -58,3 +58,25 @@ def test_extract_decision_maker_variants_and_unicode():
 def test_extract_decision_maker_none():
     assert extract_decision_maker("") == ("", "")
     assert extract_decision_maker("no title here") == ("", "")
+
+
+# -- Adversarial regressions (B3) -----------------------------------------
+
+def test_extract_decision_maker_rejects_boilerplate():
+    # Nav/footer legal phrasing must not fabricate a decision maker.
+    assert extract_decision_maker(
+        "Terms Of Service. Our Managing Director oversees all.") == ("", "")
+    assert extract_decision_maker(
+        "Our website uses cookies. Contact us about our privacy policy.") == ("", "")
+
+
+def test_extract_decision_maker_rejects_testimonial():
+    # A testimonial author is NOT the business owner.
+    assert extract_decision_maker(
+        '"Best plumber!" says Mary Johnson, a happy customer.') == ("", "")
+
+
+def test_extract_decision_maker_keeps_real():
+    assert extract_decision_maker("John Smith, CEO of Acme Plumbing") == ("John Smith", "CEO")
+    assert extract_decision_maker("Our team is led by Jane Doe, Managing Director") == (
+        "Jane Doe", "Managing Director")

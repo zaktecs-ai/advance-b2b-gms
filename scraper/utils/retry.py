@@ -25,6 +25,8 @@ def retry(
     exceptions: tuple = (Exception,),
 ) -> T:
     """Call fn with exponential backoff; re-raise after exhausting retries."""
+    if retries < 0:
+        raise ValueError("retries must be >= 0")
     last: Exception | None = None
     for attempt in range(retries + 1):
         try:
@@ -34,7 +36,8 @@ def retry(
             if attempt >= retries:
                 break
             time.sleep(backoff_delay(attempt, base, cap, jitter))
-    assert last is not None
+    if last is None:
+        raise RuntimeError("retry(): no attempt was made")
     raise last
 
 

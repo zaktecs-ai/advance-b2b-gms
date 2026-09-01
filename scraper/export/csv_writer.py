@@ -68,6 +68,31 @@ class AtomicCSVWriter:
         except Exception:
             return 0
 
+    def truncate_to(self, n_rows: int) -> None:
+        """Drop every data row beyond ``n_rows`` (keep header + first n rows).
+
+        Used by startup reconciliation so a CSV row that was durably written but
+        whose checkpoint commit didn't land is trimmed — the checkpoint is the
+        single authority for how many rows are valid.
+        """
+        if self._fh is not None:
+            self._fh.flush()
+            self._fh.close()
+            self._fh = None
+        try:
+            with open(self.path, "r", encoding="utf-8", newline="") as fh:
+                rows = list(csv.reader(fh))
+        except Exception as e:  # noqa: BLE001
+            log.warning("truncate_to read failed: %s", e)
+            self._open()
+            return
+        keep = rows[: n_rows + 1] if len(rows) > 1 else rows
+        with open(self.path, "w", encoding="utf-8", newline="") as fh:
+            csv.writer(fh).writerows(keep)
+            fh.flush()
+            os.fsync(fh.fileno())
+        self._open()
+
     def append(self, row: dict) -> int:
         ordered = {c: row.get(c, "") for c in self.columns}
         for k in list(ordered):

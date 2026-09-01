@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS counters (
 
 
 class CheckpointStore:
+    # The JSON mirror is a convenience, human-readable snapshot, NOT the
+    # crash-safe source of truth (SQLite+WAL is). Refreshing it once per record
+    # is O(n²) total I/O, so it is written only every N records plus once at
+    # close. Live-progress tooling should read the SQLite `counters` table.
+    MIRROR_EVERY = 500
+
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +73,7 @@ class CheckpointStore:
             self._conn.executescript(_SCHEMA)
         self._json_path = self.path.with_suffix(".json")
         self._backup_path = self.path.with_name(self.path.name + ".backup.json")
+        self._since_mirror = 0
         self._load_existing()
 
     # -- dedup / identity preload ------------------------------------------
@@ -150,7 +157,7 @@ class CheckpointStore:
                  sig.get("city"), source_query, json.dumps(raw, ensure_ascii=False),
                  time.time()),
             )
-        self._write_mirror()
+        self._maybe_mirror()
 
     def set_stage(self, record_id: str, stage: str) -> None:
         with self._lock, self._conn:
@@ -165,7 +172,7 @@ class CheckpointStore:
                 "UPDATE records SET stage='committed', committed_row=?, updated_at=? WHERE record_id=?",
                 (row_index, time.time(), record_id),
             )
-        self._write_mirror()
+        self._maybe_mirror()
 
     def committed_rows(self) -> list[dict]:
         with self._lock:
@@ -180,6 +187,14 @@ class CheckpointStore:
             except (json.JSONDecodeError, TypeError):
                 continue
         return out
+
+    def committed_count(self) -> int:
+        """Number of COMMITTED records — the authority for valid CSV rows."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM records WHERE stage='committed'"
+            ).fetchone()
+        return row["n"] if row else 0
 
     # -- counters ------------------------------------------------------------
     def incr(self, name: str, n: int = 1) -> None:
@@ -198,6 +213,18 @@ class CheckpointStore:
         return row["value"] if row else 0
 
     # -- mirror / backup -----------------------------------------------------
+    def _maybe_mirror(self) -> None:
+        """Refresh the JSON mirror at most every MIRROR_EVERY records.
+
+        The mirror is incremental-cost rather than per-record, turning O(n²)
+        total mirror I/O into O(n). The full authoritative snapshot is still
+        written once at close().
+        """
+        self._since_mirror += 1
+        if self._since_mirror >= self.MIRROR_EVERY:
+            self._since_mirror = 0
+            self._write_mirror()
+
     def _write_mirror(self) -> None:
         try:
             with self._lock:
@@ -211,4 +238,7 @@ class CheckpointStore:
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            try:
+                self._write_mirror()  # final authoritative snapshot
+            finally:
+                self._conn.close()

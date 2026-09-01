@@ -22,6 +22,8 @@ _ALIASES = {
 
 
 def _coerce(value: Any):
+    if value is None:
+        return None
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -105,12 +107,18 @@ def _compare(record: dict, cond: dict) -> bool:
     expected = value if isinstance(value, (list, tuple, set)) else _coerce(value)
 
     if op in (">", "<", ">=", "<="):
-        try:
-            a = float(actual) if actual is not None else 0.0
-            b = float(expected)
-            result = {">": a > b, "<": a < b, ">=": a >= b, "<=": a <= b}[op]
-        except (TypeError, ValueError):
+        # A missing/unparseable numeric field is "unknown", not "0". Resolve
+        # the comparison to False so an unknown number can neither satisfy an
+        # include nor (via NOT) an exclude — fail-closed in both directions.
+        if actual is None:
             result = False
+        else:
+            try:
+                a = float(actual)
+                b = float(expected)
+                result = {">": a > b, "<": a < b, ">=": a >= b, "<=": a <= b}[op]
+            except (TypeError, ValueError):
+                result = False
     elif op == "!=":
         result = actual != expected
     elif op == "in":

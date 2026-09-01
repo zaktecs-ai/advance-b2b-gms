@@ -3,6 +3,8 @@
 MX:           DNS lookup cached per-domain (dnspython). No SMTP dependency.
 SMTP:         Direct socket verification (EHLO -> MAIL FROM -> RCPT TO),
               explicit statuses, never converts uncertainty into certainty.
+              A control RCPT to a guaranteed-nonexistent address distinguishes
+              a genuinely deliverable mailbox from a catch-all domain.
 
 Both are OFF by default and the engine runs normally without them.
 """
@@ -10,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import threading
+import uuid
 
 from ..utils.dns_cache import DNSCache
 
@@ -66,12 +70,19 @@ class SMTPVerifier:
     """Direct SMTP verification with explicit, non-guaranteed statuses."""
 
     def __init__(self, enabled: bool = False, timeout: float = 15.0,
-                 from_email: str = "verify@example.com", retries: int = 1):
+                 from_email: str = "verify@example.com", retries: int = 1,
+                 max_workers: int = 3):
         self.enabled = enabled
         self.timeout = timeout
         self.from_email = from_email
         self.retries = retries
         self._mx_cache: dict = {}
+        self._mx_cache_lock = threading.Lock()
+        self.max_workers = max(1, max_workers)
+        # Cap simultaneous outbound port-25 connections so verifying many
+        # domains cannot open a flood of sockets and get the host IP
+        # blacklisted. Sized from config.smtp.workers (B5 / D1).
+        self._gate = threading.Semaphore(self.max_workers)
 
     def verify(self, email: str, mx: tuple | None = None) -> tuple[str, str]:
         """Return (status, reason). See models.SMTP_STATUSES for the status set."""
@@ -115,11 +126,13 @@ class SMTPVerifier:
     def _mx_status(self, domain: str, mx: tuple | None) -> tuple[str, str]:
         if mx is not None:
             return mx
-        if domain in self._mx_cache:
-            return self._mx_cache[domain]
+        with self._mx_cache_lock:
+            if domain in self._mx_cache:
+                return self._mx_cache[domain]
         checker = MXChecker(enabled=True, timeout=5.0)
         result = checker.check("x@" + domain)
-        self._mx_cache[domain] = result
+        with self._mx_cache_lock:
+            self._mx_cache[domain] = result
         return result
 
     def _mx_hosts(self, domain: str) -> list:
@@ -133,20 +146,43 @@ class SMTPVerifier:
         return []
 
     def _smtp_transaction(self, host: str, email: str) -> tuple[str, str]:
-        with smtplib.SMTP(timeout=self.timeout) as smtp:
-            code, _ = smtp.connect(host, 25)
-            if code != 220:
-                return "Connection Failed", f"greeting_{code}"
-            smtp.ehlo()
-            if smtp.has_extn("starttls"):
-                smtp.starttls()
+        """Run one SMTP transaction, distinguishing catch-all from deliverable.
+
+        For a 250 (accepted) response we send a second RCPT to a guaranteed-
+        nonexistent random address at the same domain. If that is also accepted
+        the domain is a catch-all and the result is downgraded to Catch-All
+        rather than falsely reported Verified.
+        """
+        with self._gate:
+            with smtplib.SMTP(timeout=self.timeout) as smtp:
+                code, _ = smtp.connect(host, 25)
+                if code != 220:
+                    return "Connection Failed", f"greeting_{code}"
                 smtp.ehlo()
-            smtp.mail(self.from_email)
-            code, resp = smtp.rcpt(email)
-            if code == 250:
-                return "Verified", "rcpt_250"
-            if code == 550:
-                return "Invalid", "rcpt_550"
-            if code == 452:
-                return "Inconclusive", "greylisted_452"
-            return "Inconclusive", f"rcpt_{code}"
+                if smtp.has_extn("starttls"):
+                    smtp.starttls()
+                    smtp.ehlo()
+                smtp.mail(self.from_email)
+                code, _resp = smtp.rcpt(email)
+                if code == 250:
+                    return self._catch_all_probe(smtp, email)
+                if code == 550:
+                    return "Invalid", "rcpt_550"
+                if code == 452:
+                    return "Inconclusive", "greylisted_452"
+                return "Inconclusive", f"rcpt_{code}"
+
+    @staticmethod
+    def _catch_all_probe(smtp, email: str) -> tuple[str, str]:
+        """Probe a nonexistent address to detect a catch-all domain."""
+        domain = email.rsplit("@", 1)[-1]
+        probe = f"nonexistent-{uuid.uuid4().hex[:12]}@{domain}"
+        try:
+            pcode, _ = smtp.rcpt(probe)
+        except Exception:  # some servers RST after the probe address
+            pcode = None
+        if pcode == 250:
+            return "Catch-All", "catch_all_accepts_any"
+        if pcode == 550:
+            return "Verified", "rcpt_250"
+        return "Inconclusive", "catchall_probe_inconclusive"

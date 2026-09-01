@@ -66,6 +66,32 @@ def test_blank_page_all_no():
         assert out[f] == "NO"
 
 
+def test_prose_mentions_do_not_flip_tech_signals():
+    # B4: a brand/keyword mention in body copy is not an installed integration.
+    out, _ = SignalDetector().run(_ctx(
+        text="Our blog explains how gtag() works and how to set up analytics."))
+    assert out["ga4"] == "NO"
+    out2, _ = SignalDetector().run(_ctx(
+        text="Unlike fresha.com, we do everything in-house."))
+    assert out2["booking_system"] == "NO"
+    out3, _ = SignalDetector().run(_ctx(
+        html="<p>An intercom system was installed in our office.</p>"))
+    assert out3["chat_widget"] == "NO"
+    out4, _ = SignalDetector().run(_ctx(
+        html="<p>We use a tag manager to organize our marketing scripts.</p>"))
+    assert out4["advertising"] == "NO"
+
+
+def test_real_ga4_and_booking_still_detected():
+    out, _ = SignalDetector().run(_ctx(
+        html="<script src='https://www.googletagmanager.com/gtag/js?id=G-ABCDEFGH'></script>"))
+    assert out["ga4"] == "YES"
+    out2, _ = SignalDetector().run(
+        _ctx(html="<a href='https://calendly.com/acme/30min'>book</a>",
+             urls=["https://calendly.com/acme/30min"]))
+    assert out2["booking_system"] == "YES"
+
+
 def test_review_panel_sentiment_roundtrip():
     # Reviews from the collector must flow into analysis: a positive review
     # produces a positive sentiment and populated keywords.

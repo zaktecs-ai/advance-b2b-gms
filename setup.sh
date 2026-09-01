@@ -8,11 +8,18 @@ VENV_DIR=".venv"
 
 echo "==> Installing system dependencies (apt)"
 sudo apt-get update -y
+# A failure here MUST stop the script (set -e) rather than silently degrade
+# the runtime (E1). Each optional package lives on its own line with a loud,
+# non-fatal warning instead of muting the whole install.
 sudo apt-get install -y \
   "$PYTHON_BIN" "$PYTHON_BIN-venv" "$PYTHON_BIN-dev" \
   git tmux \
   libjpeg-dev zlib1g-dev libssl-dev libffi-dev \
-  libxml2-dev libxslt1-dev 2>/dev/null || true
+  libxml2-dev libxslt1-dev
+# tmux is genuinely optional (server.sh falls back to nohup); warn only.
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "[warn] tmux is not installed; './server.sh run' will use nohup instead." >&2
+fi
 
 echo "==> Creating virtualenv"
 if [ ! -d "$VENV_DIR" ]; then

@@ -160,8 +160,8 @@ def _first_text(page, selectors, timeout=2000):
                 txt = loc.inner_text(timeout=timeout).strip()
                 if txt:
                     return txt
-        except Exception:
-            continue
+        except Exception as e:
+            log.debug("selector miss: %s (%s)", sel, e)
     return None
 
 
@@ -170,8 +170,8 @@ def _first_attr(page, selector, attr, timeout=2000):
         loc = page.locator(selector).first
         if loc.count() > 0:
             return loc.get_attribute(attr, timeout=timeout)
-    except Exception:
-        return None
+    except Exception as e:
+        log.debug("selector miss: %s (%s)", selector, e)
     return None
 
 
@@ -187,8 +187,8 @@ def _extract_hours(page) -> str:
                 labels.append(label)
             if labels:
                 return "; ".join(labels)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("hours selector miss: %s", e)
     for sel in HOURS_TABLE_SELECTORS:
         try:
             loc = page.locator(sel).first
@@ -196,8 +196,8 @@ def _extract_hours(page) -> str:
                 txt = loc.inner_text(timeout=1500).strip()
                 if txt:
                     return txt
-        except Exception:
-            continue
+        except Exception as e:
+            log.debug("hours selector miss: %s (%s)", sel, e)
     return "N/A"
 
 
@@ -271,6 +271,12 @@ class MapsCollector:
             if detect_bot_challenge(page.content()):
                 log.warning("bot challenge for query %r — cooling down %.0fs",
                             query, self._cooldown)
+                # A bot challenge often means the egress IP (proxy) is flagged;
+                # feed that back so the proxy drops out of rotation (A3).
+                try:
+                    self._bm.report_proxy_failure()
+                except Exception:
+                    pass
                 if self._cooldown:
                     time.sleep(self._cooldown)
                 raise ZeroListingsError(query, "bot challenge / CAPTCHA detected")
@@ -317,11 +323,14 @@ class MapsCollector:
                 self._small_pause()
                 self._maps_pacing_pause()
         finally:
-            try:
-                page.close()
-                ctx.close()
-            except Exception:
-                pass
+            # Teardown each resource under its own guard so one failure
+            # (e.g. a hung renderer raising in page.close) cannot strand the
+            # context and leak its child processes (A6).
+            for closer in (page.close, ctx.close):
+                try:
+                    closer()
+                except Exception as e:
+                    log.debug("teardown error: %s", e)
 
     # -- click-driven detail-panel extraction -----------------------------
     def _open_and_extract(self, page, place_url: str, position: int = 0,
@@ -336,14 +345,26 @@ class MapsCollector:
                           wait_until="domcontentloaded",
                           timeout=self._bm.nav_timeout_ms)
                 time.sleep(1.5)
-            except Exception:
+            except Exception as e:  # A5: log so a failed goto isn't silently N/A
+                log.debug("goto fallback failed for %s: %s", place_url, e)
+                try:
+                    self._bm.report_proxy_failure()
+                except Exception:
+                    pass
                 return data
 
         try:
             page.wait_for_selector('h1', timeout=10_000)
+        except Exception as e:
+            log.debug("detail-panel h1 wait missed for %s: %s", place_url, e)
+        # Wait for the detail panel to hydrate on a concrete marker instead of a
+        # blind sleep (A4). Unbounded condition-waits can hang on Maps'
+        # persistent connections, so this is a bounded wait on a real panel
+        # element with a short fallback sleep for slow SPA hydration.
+        try:
+            page.wait_for_selector(NAME_SELECTORS[0], timeout=5_000)
         except Exception:
-            pass
-        time.sleep(1.2)
+            time.sleep(1.0)
 
         data["business_name"] = _first_text(page, NAME_SELECTORS)
         data["category"] = _first_text(page, CATEGORY_SELECTORS)
@@ -392,8 +413,8 @@ class MapsCollector:
                         locs.nth(i).click(timeout=5000)
                         time.sleep(1.0)
                         return True
-            except Exception:
-                continue
+            except Exception as e:
+                log.debug("click-to-open miss: %s (%s)", sel, e)
         return False
 
     def _extract_rating_reviews(self, page):
@@ -404,8 +425,8 @@ class MapsCollector:
                     rating, count = extract_rating_reviews(loc.inner_text(timeout=2000))
                     if rating != "N/A" or count != "N/A":
                         return rating, count
-            except Exception:
-                continue
+            except Exception as e:
+                log.debug("rating selector miss: %s (%s)", sel, e)
         for sel in REVIEW_COUNT_SELECTORS:
             try:
                 loc = page.locator(sel).first
@@ -414,11 +435,12 @@ class MapsCollector:
                     rating, count = extract_rating_reviews(aria)
                     if rating != "N/A" or count != "N/A":
                         return rating, count
-            except Exception:
-                continue
+            except Exception as e:
+                log.debug("review-count selector miss: %s (%s)", sel, e)
         try:
             header = page.locator('div[role="main"]').inner_text(timeout=2000)
-        except Exception:
+        except Exception as e:
+            log.debug("rating header miss: %s", e)
             header = ""
         return extract_rating_reviews(header or "")
 
@@ -426,16 +448,16 @@ class MapsCollector:
         try:
             if page.locator(CLAIM_SELECTOR).count() > 0:
                 return "Unclaimed"
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("claim selector miss: %s", e)
         return "Claimed"
 
     def _business_status(self, page) -> str:
         try:
             if page.locator("text=Permanently closed").count() > 0:
                 return "Permanently closed"
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("closed-status selector miss: %s", e)
         for sel in STATUS_SELECTORS:
             try:
                 loc = page.locator(sel).first
@@ -448,9 +470,9 @@ class MapsCollector:
                         if low.startswith(("closed", "closes")):
                             return "Closed"
                         return txt.split("·")[0].strip()
-            except Exception:
-                continue
-        return "Open"
+            except Exception as e:
+                log.debug("status selector miss: %s (%s)", sel, e)
+        return "N/A"
 
     # -- feed scrolling / link extraction ---------------------------------
     def _scroll_results(self, page) -> None:
@@ -485,18 +507,24 @@ class MapsCollector:
             return False
 
     def _extract_listing_links(self, page) -> list:
-        links: set = set()
+        # Preserve DOM (Maps relevance-ranked) order while deduping via a side
+        # set. A bare `set` -> `list` has no stable order across processes
+        # (hash randomization), so a capped first-N slice would otherwise pick a
+        # different subset of businesses on every run.
+        links: list = []
+        seen: set = set()
         for sel in RESULT_CARD_SELECTORS:
             try:
                 locs = page.locator(sel)
                 n = locs.count()
                 for i in range(n):
                     href = locs.nth(i).get_attribute("href", timeout=1500)
-                    if href and "/maps/place/" in href:
-                        links.add(href)
+                    if href and "/maps/place/" in href and href not in seen:
+                        seen.add(href)
+                        links.append(href)
             except Exception:
                 continue
-        return list(links)
+        return links
 
     def _small_pause(self) -> None:
         lo, hi = self._scroll_delay

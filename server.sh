@@ -33,7 +33,9 @@ ensure_config() {
   if [ ! -f "$CONFIG_FILE" ]; then
     require_file "$ROOT_DIR/config.yaml"
     cp "$ROOT_DIR/config.yaml" "$CONFIG_FILE"
-    say "Created config.local.yaml. Edit it with './server.sh config'."
+    # config.local.yaml may later hold ${VAR} references; restrict to owner.
+    chmod 600 "$CONFIG_FILE"
+    say "Created config.local.yaml (owner-only). Edit it with './server.sh config'."
   fi
   require_file "$CONFIG_FILE"
 }
@@ -95,7 +97,8 @@ cmd_setup() {
   "$ROOT_DIR/setup.sh"
   if [ ! -f "$ROOT_DIR/.env" ] && [ -f "$ROOT_DIR/.env.example" ]; then
     cp "$ROOT_DIR/.env.example" "$ROOT_DIR/.env"
-    say "Created .env from .env.example. Add optional API keys if needed."
+    chmod 600 "$ROOT_DIR/.env"
+    say "Created .env from .env.example (owner-only). Add optional API keys if needed."
   fi
   ensure_config
   say "Setup complete. Next: ./server.sh config, then ./server.sh run --demo"

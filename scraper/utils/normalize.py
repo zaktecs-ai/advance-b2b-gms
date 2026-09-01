@@ -66,6 +66,22 @@ _DISPOSABLE_DOMAINS = {
     "email.com", "domain.com", "test.com", "placeholder.com",
 }
 
+# Analytics / ad / CDN / error-tracking vendor domains whose addresses are
+# never a business's contact email. Matched by suffix (subdomain-inclusive).
+_VENDOR_DOMAINS = {
+    "googletagmanager.com", "google-analytics.com", "doubleclick.net",
+    "googlesyndication.com", "googleadservices.com", "sentry.io",
+    "facebook.net", "cloudflare.com", "gstatic.com", "googlegroups.com",
+    "zendesk.com", "hubspot.com", "intercom.io", "mailchimp.com",
+    "campaignmonitor.com", "constantcontact.com", "sendgrid.net",
+}
+
+# File extensions that a regex email parser may mistake for a TLD.
+_ASSET_TLDS = {
+    "png", "jpg", "jpeg", "gif", "svg", "webp", "css", "js", "mjs", "ico",
+    "woff", "woff2", "ttf", "map", "json", "xml", "php", "html", "htm",
+}
+
 
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
 _FORMATTING_NOISE = {
@@ -257,9 +273,20 @@ def normalize_phone(raw: str | None, default_country: str = "US") -> str:
     # Google Maps commonly exposes ``phone:tel:+...`` as the attribute value;
     # other sources use a plain ``tel:`` URI.
     candidate = re.sub(r"^(?:phone:tel:|tel:)", "", candidate, flags=re.I).strip()
-    # Strip a terminal extension before validating the number token.  Other
-    # alphabetic words are source garbage, not phone syntax.
-    candidate = re.sub(r"(?:ext(?:ension)?|x)\s*[#.: -]*\d+$", "", candidate, flags=re.I).strip()
+    # Strip an extension (and any trailing noise that follows it) so a valid
+    # number with an extension survives instead of being nuked whole. The
+    # extension keyword may be ext/extension/x/#/poste/anexo and is optional;
+    # a bare "#22" is also recognized.
+    candidate = re.sub(
+        r"[\s,;]*(?:ext(?:ension)?\.?|x|#|poste|anexo)\s*[:.#\- ]*\s*\d+\b.*$",
+        "", candidate, flags=re.I,
+    ).strip()
+    # After extension removal, keep only the leading numeric phone token and
+    # drop any remaining trailing alphabetic words, so a stray "call anytime"
+    # cannot poison an otherwise valid number.
+    m = re.match(r"[+]?[\d\s().,\-]+", candidate)
+    if m and m.group(0).strip() != candidate.strip():
+        candidate = m.group(0).strip()
     if not candidate or not re.fullmatch(r"[\d\s().,+-]+", candidate):
         return "N/A"
 
@@ -313,23 +340,37 @@ def is_personal_provider(domain: str) -> bool:
 
 
 def email_rejection_reason(email: str, website_url: str | None = None) -> str | None:
-    """Return a rejection reason string or None if the email is acceptable."""
+    """Return a rejection reason string or None if the email is acceptable.
+
+    Rejection categories (in priority order): malformed syntax, an asset
+    filename "TLD", a disposable/placeholder domain, a tracking-vendor domain,
+    an over-long address, and — when a website is known — an off-domain
+    non-personal address (which defaults to rejected rather than accepted).
+    """
     e = normalize_email(email)
     if not e:
         return "invalid_syntax"
     if "@" not in e:
         return "invalid_syntax"
     local, domain = e.rsplit("@", 1)
-    if domain in _DISPOSABLE_DOMAINS:
+    if "/" in local or "\\" in local:
+        return "invalid_syntax"
+    tld = domain.rsplit(".", 1)[-1].lower()
+    if tld in _ASSET_TLDS:
+        return "asset_filename"
+    if any(domain == d or domain.endswith("." + d) for d in _DISPOSABLE_DOMAINS):
         return "disposable_domain"
+    if any(domain == d or domain.endswith("." + d) for d in _VENDOR_DOMAINS):
+        return "vendor_or_disposable_domain"
     if len(e) > 120:
         return "too_long"
     if website_url:
         wd = extract_domain(website_url)
         if wd and domain != wd and not is_personal_provider(domain):
-            # Off-domain: reject only if the local part carries a suspicious word.
-            if any(w in local for w in _SUSPICIOUS_WORDS):
-                return "off_domain_suspicious"
+            # Off-domain non-personal emails default to rejected (privacy +
+            # data-quality); a suspicious local part is no longer required to
+            # trigger rejection, it is simply an additional signal.
+            return "off_domain"
     return None
 
 

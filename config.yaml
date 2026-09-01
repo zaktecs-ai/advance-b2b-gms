@@ -80,10 +80,12 @@ ai_hook:
   model: ""                    # empty = provider default
   api_key_env: ""              # empty = OPENAI_API_KEY / DEEPSEEK_API_KEY
   timeout_seconds: 30
+  max_calls: 0                 # 0 = unlimited; caps per-run LLM spend
+  retries: 2
 
 concurrency:
-  website_workers: 8
-  playwright_workers: 2
+  website_workers: 8           # parallel website enrichment (I/O-bound)
+  playwright_workers: 2        # reserved for a future concurrent collector
 
 delays:
   maps_min_seconds: 2.0
@@ -110,8 +112,8 @@ logging:
   quiet: false             # true = hide the progress lines (for cron/tmux)
 
 runtime:
-  website_workers: 4
-  playwright_workers: 2
+  # Worker counts live under `concurrency:` (above) — the duplicate knobs that
+  # used to live here were validated but never read, and have been removed.
   request_timeout: 20.0
   idle_exit_seconds: 0
   pacing: 1.0

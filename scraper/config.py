@@ -115,9 +115,18 @@ class LLMHookConfig(BaseModel):
     model: str = ""                 # empty = provider default
     api_key_env: str = ""           # empty = provider default env var
     timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    max_calls: int = Field(default=0, ge=0)  # 0 = unlimited; caps per-run spend
+    retries: int = Field(default=2, ge=0, le=5)
 
 
 class ConcurrencyConfig(BaseModel):
+    """Worker counts actually consumed by the pipeline's enrichment stage.
+
+    ``website_workers`` bounds the ThreadPoolExecutor used to parallelize the
+    I/O-bound fetch/enrich/verify work. ``playwright_workers`` is reserved for
+    a future concurrent collector (the Maps collector remains serial by design
+    — a single shared browser drives one detail panel at a time).
+    """
     website_workers: int = Field(default=8, ge=1, le=16)
     playwright_workers: int = Field(default=2, ge=1, le=4)
 
@@ -143,8 +152,12 @@ class LoggingConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    website_workers: int = Field(default=4, ge=1, le=64)
-    playwright_workers: int = Field(default=2, ge=1, le=16)
+    """Tunables consumed by the runtime loop (pacing, timeouts, idle-exit).
+
+    Worker counts live ONLY in ``ConcurrencyConfig`` — a second set of knobs
+    here previously validated but was never read, which misled operators into
+    thinking parallelism was configurable in two places.
+    """
     request_timeout: float = Field(default=20.0, ge=1.0, le=120.0)
     idle_exit_seconds: int = Field(default=0, ge=0)
     pacing: float = Field(default=1.0, ge=0.0, le=30.0)

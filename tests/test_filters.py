@@ -66,3 +66,22 @@ def test_split_filters():
     assert "include_all" in pre and "exclude_any" in post
     assert any("email_found" in c for c in post.get("include_all", []))
     assert any("city" in c for c in pre.get("include_all", []))
+
+
+def test_coerce_none_is_none_not_string():
+    # D3: a missing numeric field must coerce to None, not the string "None",
+    # so float("None") can't raise and the null-guard actually fires.
+    from scraper.filters.engine import _coerce
+    assert _coerce(None) is None
+    assert _coerce("") is False
+
+
+def test_missing_numeric_field_is_unknown_fail_closed():
+    # D3: an unknown numeric field resolves comparisons to False, never to a
+    # phantom 0 (which would wrongly satisfy "reviews <= N").
+    rec = {"business_name": "A"}  # no review_count
+    assert evaluate(rec, {"include_all": [{"reviews": 0, "op": "<="}]})[0] is False
+    assert evaluate(rec, {"include_all": [{"reviews": 100, "op": ">="}]})[0] is False
+    # A present value still compares normally.
+    rec2 = {"business_name": "A", "review_count": 3}
+    assert evaluate(rec2, {"include_all": [{"reviews": 0, "op": ">="}]})[0] is True

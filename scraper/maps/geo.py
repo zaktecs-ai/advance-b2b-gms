@@ -72,7 +72,12 @@ def _lon_step(bbox: BoundingBox, size_km: float) -> float:
 
 
 def generate_cells(bbox: BoundingBox, cell_size_km: float) -> list[Cell]:
-    """Return the center point of every grid cell covering the bbox."""
+    """Return the center point of every grid cell covering the bbox.
+
+    A bounding box smaller than half a cell still yields exactly one cell (its
+    center), so a small town targeted with a coarse cell size is searched at
+    least once instead of silently producing zero cells (A10).
+    """
     size = _normalize_cell_size(cell_size_km)
     lat_step = size / _KM_PER_DEG_LAT
     lon_step = _lon_step(bbox, size)
@@ -84,6 +89,12 @@ def generate_cells(bbox: BoundingBox, cell_size_km: float) -> list[Cell]:
             cells.append(Cell(lat=lat, lon=lon))
             lon += lon_step
         lat += lat_step
+    if not cells:
+        # Fallback: a single cell centered on the (tiny) bounding box.
+        cells.append(Cell(
+            lat=(bbox.min_lat + bbox.max_lat) / 2,
+            lon=(bbox.min_lon + bbox.max_lon) / 2,
+        ))
     return cells
 
 
@@ -101,7 +112,9 @@ def estimate_cell_count(bbox: BoundingBox, cell_size_km: float) -> int:
     lon_step = _lon_step(bbox, size)
     lat_cells = _count_steps(bbox.max_lat - bbox.min_lat, lat_step)
     lon_cells = _count_steps(bbox.max_lon - bbox.min_lon, lon_step)
-    return lat_cells * lon_cells
+    n = lat_cells * lon_cells
+    # Mirror generate_cells' floor so the two stay in agreement on tiny boxes.
+    return n if n > 0 else 1
 
 
 def parse_bounding_box(s: str) -> BoundingBox:
