@@ -98,11 +98,19 @@ class IdentityResolver:
                  seen_domains: set[str] | None = None,
                  seen_phones: set[str] | None = None,
                  seen_domain_city: set[str] | None = None,
+                 domain_first_name: dict[str, str] | None = None,
+                 phone_first_name: dict[str, str] | None = None,
                  default_country: str = "US"):
         self._identities: set[str] = set(seen_identities or set())
         self._domains: set[str] = set(seen_domains or set())
         self._phones: set[str] = set(seen_phones or set())
         self._domain_city: set[str] = set(seen_domain_city or set())
+        # Name-key guards that apply regardless of strong id presence: a genuine
+        # multi-location chain shares a domain with DIFFERENT names (never
+        # merge those), while identical name + domain/phone is a duplicate even
+        # under two distinct place_ids (F06).
+        self._domain_first_name: dict[str, str] = dict(domain_first_name or {})
+        self._phone_first_name: dict[str, str] = dict(phone_first_name or {})
         self._default_country = default_country
 
     def is_duplicate(self, record: dict) -> tuple[bool, str, dict]:
@@ -111,11 +119,22 @@ class IdentityResolver:
         key = sig["identity_key"]
         domain = sig["canonical_domain"]
         phone = sig["normalized_phone"]
+        nk = sig.get("name_key") or ""
         city = sig["city"]
         has_strong_id = sig["kgmid"] is not None or sig["place_id"] is not None
 
         if key and key in self._identities:
             return True, f"duplicate_identity:{sig['key_type']}", sig
+
+        # Same-domain / same-phone guards requiring matching name keys. These
+        # run REGARDLESS of strong ids, but merge only when names match, so a
+        # chain's distinct locations are never merged (F06).
+        if domain and domain in self._domains and nk:
+            if self._domain_first_name.get(domain) == nk:
+                return True, "duplicate_domain+name", sig
+        if phone and phone in self._phones and nk:
+            if self._phone_first_name.get(phone) == nk:
+                return True, "duplicate_phone+name", sig
 
         # Weak fallback guards apply ONLY to records lacking a strong id.
         if not has_strong_id:
@@ -130,10 +149,13 @@ class IdentityResolver:
             self._identities.add(key)
         if domain:
             self._domains.add(domain)
+            self._domain_first_name.setdefault(domain, nk)
             if city and not has_strong_id:
                 self._domain_city.add(f"{domain}|{city}")
-        if phone and not has_strong_id:
-            self._phones.add(phone)
+        if phone:
+            self._phone_first_name.setdefault(phone, nk)
+            if not has_strong_id:
+                self._phones.add(phone)
         return False, "", sig
 
     def rollback(self, record: dict) -> None:
@@ -143,12 +165,17 @@ class IdentityResolver:
         key = sig["identity_key"]
         domain = sig["canonical_domain"]
         phone = sig["normalized_phone"]
+        nk = sig.get("name_key") or ""
         city = sig["city"]
         if key:
             self._identities.discard(key)
         if domain:
             self._domains.discard(domain)
+            if self._domain_first_name.get(domain) == nk:
+                self._domain_first_name.pop(domain, None)
             if city:
                 self._domain_city.discard(f"{domain}|{city}")
         if phone:
             self._phones.discard(phone)
+            if self._phone_first_name.get(phone) == nk:
+                self._phone_first_name.pop(phone, None)

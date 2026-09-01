@@ -53,7 +53,10 @@ def crawl_priority(html: str, base_url: str, max_pages: int = 10) -> list:
     then contact/about/services by hint order)."""
     links = extract_links(html, base_url)
     internal = [l for l in links if _is_same_domain(l, base_url)]
-    internal = sorted(set(internal), key=_priority)
+    # Order-preserving dedup before a stable sort; a bare set->list had
+    # non-deterministic order across runs (F24).
+    internal = list(dict.fromkeys(internal))
+    internal = sorted(internal, key=_priority)
     return internal[:max_pages]
 
 

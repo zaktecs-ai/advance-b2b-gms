@@ -97,6 +97,17 @@ class SMTPConfig(BaseModel):
     verification_timeout_seconds: float = Field(default=20.0, ge=1.0)
     from_email: str = "verify@example.com"
 
+    @model_validator(mode="after")
+    def _require_real_from_email_when_enabled(self):
+        # A placeholder `@example.com` sender silently broke SMTP verification
+        # (F23). Fail fast when enabled with a placeholder sender.
+        if self.enabled and self.from_email.endswith("@example.com"):
+            raise ValueError(
+                "smtp.from_email must be a real domain (not @example.com) "
+                "when smtp.enabled is true"
+            )
+        return self
+
 
 class EnrichmentConfig(BaseModel):
     emails: bool = True
@@ -106,6 +117,13 @@ class EnrichmentConfig(BaseModel):
     mx_verify: bool = False        # off by default
     smtp_verify: bool = False      # off by default
     require_website: bool = False
+    # CSS selectors stripped before email/decision-maker extraction. The risky
+    # `.author`/`blockquote`/`.quote`/`cite` selectors were REMOVED from the
+    # default because many themes use them for real team bios (F33).
+    exclude_selectors: list = Field(default_factory=lambda: [
+        ".testimonial", ".testimonials", ".review", ".reviews", ".review-body",
+        ".comment", ".comments", ".wp-block-comment", "figcaption",
+    ])
 
 
 class LLMHookConfig(BaseModel):

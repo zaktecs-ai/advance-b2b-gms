@@ -6,6 +6,7 @@ unit-testable headlessly.
 from __future__ import annotations
 
 import re
+from urllib.parse import unquote
 
 from ..utils.normalize import normalize_text
 from ..utils.text import to_int
@@ -287,7 +288,9 @@ def decompose_address(address: str) -> dict:
     if cleaned == "N/A":
         return out
 
-    segments = [normalize_text(part) for part in re.split(r"\s*,\s*", cleaned)]
+    # Widen separators to include newline, middle-dot, and pipe so non-comma
+    # address layouts no longer collapse to all-N/A (F22).
+    segments = [normalize_text(part) for part in re.split(r"\s*[,\n·|]\s*", cleaned)]
     segments = [part for part in segments if part != "N/A"]
     explicit_country = _country_from_text(segments)
     postal, postal_country = _postal_match(cleaned, explicit_country)
@@ -351,29 +354,37 @@ def parse_address(address: str) -> dict:
 
 
 def parse_google_maps_url(url: str) -> dict:
-    """Extract place_id / coordinates / cid / kgmid / query from a Maps URL."""
+    """Extract place_id / coordinates / cid / kgmid / query from a Maps URL.
+
+    All regexes run against the percent-DECODED URL (``u``), because production
+    URLs carry the kgmid token as ``!16s%2Fg%2F…``. ``cid`` is derived ONLY from
+    the authoritative ``!1s`` place token (never ``!5s``/``!3s`` ad tokens), and
+    coordinates come ONLY from the ``!3d…!4d…`` place pin — never the
+    ``/maps/@…`` search-camera viewport.
+    """
     out = {"query": None}
-    m = re.search(r"/maps/search/([^/]+)", url or "")
+    if not url:
+        return out
+    u = unquote(str(url))
+    m = re.search(r"/maps/search/([^/]+)", u)
     if m:
         out["query"] = m.group(1)
-    m = re.search(r"/maps/place/([^/]+)", url or "")
+    m = re.search(r"/maps/place/([^/]+)", u)
     if m:
         out["place_name"] = m.group(1)
-    m = re.search(r"!1s(0x[0-9a-fA-F]+:0x[0-9a-fA-F]+)", url or "")
+    m = re.search(r"!1s(0x[0-9a-fA-F]+:0x[0-9a-fA-F]+)", u)
     if m:
         out["place_id"] = m.group(1)
-    m = re.search(r"/maps/@(-?\d+\.\d+),(-?\d+\.\d+)", url or "")
-    if m:
-        out["lat"] = float(m.group(1))
-        out["lng"] = float(m.group(2))
-    m3 = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", url or "")
-    if m3 and "lat" not in out:
+        # cid is the same hex pair by definition (F04).
+        out["cid"] = m.group(1)
+    # Coordinates: only the true place pin (!3d…!4d…). NEVER the /maps/@
+    # viewport center, which is the search camera position, not the business
+    # location (F05).
+    m3 = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", u)
+    if m3:
         out["lat"] = float(m3.group(1))
         out["lng"] = float(m3.group(2))
-    m4 = re.search(r"0x[0-9a-fA-F]+:0x[0-9a-fA-F]+", url or "")
-    if m4:
-        out["cid"] = m4.group(0)
-    m5 = re.search(r"/g/([0-9a-zA-Z]+)", url or "")
+    m5 = re.search(r"(?:/g/|%2Fg%2F)([0-9a-zA-Z_-]+)", u, re.I)
     if m5:
         out["kgmid"] = m5.group(1)
     return out

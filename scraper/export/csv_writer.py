@@ -62,9 +62,13 @@ class AtomicCSVWriter:
             log.warning("CSV recovery failed (will append): %s", e)
 
     def _count_rows(self) -> int:
+        # Count CSV ROWS via the parser, not physical lines: a quoted field
+        # with an embedded newline (e.g. top_review) would otherwise be counted
+        # as multiple rows and make reconcilliation trim valid committed rows
+        # (F16).
         try:
             with open(self.path, "r", encoding="utf-8", newline="") as fh:
-                return max(0, sum(1 for _ in fh) - 1)
+                return max(0, sum(1 for _ in csv.reader(fh)) - 1)
         except Exception:
             return 0
 

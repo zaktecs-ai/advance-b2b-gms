@@ -43,3 +43,21 @@ def test_filter_reviews_length():
 def test_filter_reviews_dedup():
     out = filter_reviews(["same review", "same review"])
     assert len(out) == 1
+
+
+def test_clean_review_text_strips_ui_chrome():
+    from scraper.maps.reviews import clean_review_text
+    raw = ("SpiceGirl 4 reviews · 1 photo 4 months ago Adam was very "
+           "professional and courteous.  Like  Share")
+    out = clean_review_text(raw)
+    assert "Adam was very professional" in out
+    assert "4 reviews" not in out and "ago" not in out
+    assert "Like" not in out and "Share" not in out
+
+
+def test_keywords_never_contain_ui_noise():
+    from scraper.analysis.engine import review_keywords
+    kws = review_keywords(["Great job 3 months ago Like Share Response from the owner",
+                           "Fast service, fair price"])
+    for banned in ("ago", "months", "like", "share", "response", "owner"):
+        assert banned not in kws

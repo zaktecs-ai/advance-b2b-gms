@@ -58,3 +58,18 @@ def test_no_attribute_error_on_ssl_path():
     import ssl
     # Non-SSL, non-DNS ConnectError -> CONNECTION_REFUSED
     assert _classify(httpx.ConnectError("handshake reset by peer")) == FailureReason.CONNECTION_REFUSED
+
+
+def test_fetch_result_default_headers():
+    # F11: mutable-dataclass-default removed; each instance gets its own dict.
+    from scraper.websites.fetcher import FetchResult
+    assert FetchResult("u", 200, "", None, "u").headers == {}
+
+
+def test_connect_timeout_classifies_as_timeout():
+    # F12: ConnectTimeout is caught by the TIMEOUT branch (not the deleted
+    # unreachable branch).
+    import httpx
+    from scraper.websites.fetcher import _classify
+    from scraper.models import FailureReason
+    assert _classify(httpx.ConnectTimeout("x")) == FailureReason.TIMEOUT

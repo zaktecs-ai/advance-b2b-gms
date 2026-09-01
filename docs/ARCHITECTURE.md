@@ -88,10 +88,12 @@ No network or browser object is allowed in this module.
 ### Models and exports: `scraper/models.py` and `scraper/export/`
 
 `OUTPUT_COLUMNS` is the single source of truth for CSV headers, XLSX headers,
-row order, and the `BusinessRecord` contract. The schema currently has **75
-columns**. Unsupported Maps surfaces are not represented, including timezone,
-popular times, competitors, ownership posts, ad-spend flags, gas prices,
-featured questions, and rating buckets.
+row order, and the `BusinessRecord` contract. The schema currently has **68
+columns** (operator removed 7 low-value columns: `kgmid`, `cid`, `subcategory`,
+`about`, `mx_enabled`, `smtp_enabled`, `filtered_out_reason`; `kgmid`/`cid`
+remain internal dedup signals, never exported). Unsupported Maps surfaces are
+not represented, including timezone, popular times, competitors, ownership
+posts, ad-spend flags, gas prices, featured questions, and rating buckets.
 
 `AtomicCSVWriter` flushes and fsyncs every row. If an existing CSV header does
 not match the active schema, it fails closed instead of mixing incompatible

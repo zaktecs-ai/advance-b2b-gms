@@ -179,7 +179,12 @@ class BrowserManager:
         try:
             try:
                 loop = asyncio.get_event_loop()
-            except (RuntimeError, asyncio.CoroutineNotAllowedError):
+            except RuntimeError:
+                # `get_event_loop()` raises RuntimeError when there is no
+                # current event loop. The previously-referenced
+                # `asyncio.CoroutineNotAllowedError` attribute does not exist
+                # in any Python version and would itself raise AttributeError
+                # during teardown (F09).
                 loop = None
             if loop is not None and not loop.is_running() and not loop.is_closed():
                 loop.run_until_complete(asyncio.sleep(0))

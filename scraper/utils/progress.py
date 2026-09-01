@@ -89,6 +89,11 @@ class ProgressConsole:
         self._last_render = 0.0
         self._render_interval = 0.25  # seconds
         self._header_done = False
+        # Current-query result total. Kept separate from the result total that
+        # was previously also named `query_total` (a method, then shadowed by
+        # this attribute), which caused an AttributeError if the footer
+        # rendered before any query started (F13).
+        self.current_query_total = 0
         # Only a real TTY gets the clean overwrite/in-place tricks; when output
         # is piped or redirected (tmux log, nohup, cron), we emit plain lines
         # so the log stays clean instead of full of \r / escape codes.
@@ -136,9 +141,9 @@ class ProgressConsole:
         self._print("")
         self._print(_c(_Color.bold, "━━━ " + bar + " ━━━"))
 
-    def query_total(self, total: int) -> None:
+    def set_query_total(self, total: int) -> None:
         """Record the number of result cards Google returned for this query."""
-        self.query_total = total
+        self.current_query_total = total
         self._print(_c(_Color.dim, f"   found {total} results"))
 
     def business_collected(self, number: int, name: str, total: int = 0) -> None:
@@ -146,11 +151,11 @@ class ProgressConsole:
         self.total_collected += 1
         self.query_collected += 1
         if total:
-            self.query_total = total
+            self.current_query_total = total
         stamp = _c(_Color.dim, _now())
         # "12 of 96" position indicator (falls back to plain number when unknown).
-        if self.query_total > 0:
-            pos = _c(_Color.green, f"{number:>3} of {self.query_total}")
+        if self.current_query_total > 0:
+            pos = _c(_Color.green, f"{number:>3} of {self.current_query_total}")
         else:
             pos = _c(_Color.green, f"{number:>3}")
         self._print(f"   {pos}   {stamp}   {_truncate(name, 40)}")
@@ -220,8 +225,8 @@ class ProgressConsole:
         saved = _c(_Color.green, f"saved {self.total_saved}")
         remaining = _c(_Color.magenta, f"{self._remaining_queries()} left")
         pos = ""
-        if self.query_total > 0:
-            pos = f"  ·  result {min(self.query_collected, self.query_total)} of {self.query_total}"
+        if self.current_query_total > 0:
+            pos = f"  ·  result {min(self.query_collected, self.current_query_total)} of {self.current_query_total}"
         parts = (
             f"▸ {saved}  ·  collected {self.total_collected}{pos}  ·  "
             f"{remaining} queries  ·  elapsed {_fmt_duration(self.elapsed())}  ·  "

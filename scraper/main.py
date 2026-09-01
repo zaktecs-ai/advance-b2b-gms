@@ -37,7 +37,7 @@ def _build_collector(config, demo: bool, browser_manager, progress=None):
         maps_delay=(config.delays.maps_min_seconds, config.delays.maps_max_seconds),
         reviews_per_business=config.reviews.per_business,
         collect_reviews=config.reviews.enabled,
-        on_query_total=(progress.query_total if progress is not None else None),
+        on_query_total=(progress.set_query_total if progress is not None else None),
     )
 
 
@@ -51,7 +51,7 @@ def run(config_path: str, demo: bool) -> int:
     # Log file lives next to the outputs; full debug detail goes there, while
     # the console stays clean (progress only).
     out_dir = Path(config.job.output_dir) / config.job.client_name
-    setup_logging("INFO", log_file=str(out_dir / "run.log"))
+    setup_logging(config.logging.level, log_file=str(out_dir / "run.log"))
 
     # Clean console progress reporter (structured, with business names).
     from .utils.progress import ProgressConsole
@@ -61,12 +61,15 @@ def run(config_path: str, demo: bool) -> int:
 
     browser_manager = None
     collector = None
+    proxy_manager = None
     if not demo:
         # Build the Playwright-backed collector with a shared BrowserManager.
         # BrowserManager is imported lazily so HTTP-only tests don't need it.
         from .browser import BrowserManager, ProxyManager
         proxy_cfg = ProxyManager().config
         proxy_cfg.enabled = config.proxy.enabled
+        proxy_cfg.http = config.proxy.http
+        proxy_cfg.https = config.proxy.https
         proxy_cfg.pool = list(config.proxy.pool or config.proxy.urls)
         proxy_cfg.rotation = config.proxy.rotation
         proxy_manager = ProxyManager(proxy_cfg)
@@ -85,7 +88,7 @@ def run(config_path: str, demo: bool) -> int:
         collector = DemoCollector()
 
     pipeline = Pipeline(config, collector=collector, browser_manager=browser_manager,
-                        progress=progress)
+                        progress=progress, proxy_manager=proxy_manager)
     try:
         pipeline.run()
     except KeyboardInterrupt:
@@ -93,6 +96,12 @@ def run(config_path: str, demo: bool) -> int:
               file=sys.stderr)
         return 130
     finally:
+        # Release pipeline resources (csv/enricher/checkpoint/collector) even on
+        # an exception, then the browser manager (F28).
+        try:
+            pipeline.close()
+        except Exception:
+            pass
         if browser_manager is not None:
             try:
                 browser_manager.close()

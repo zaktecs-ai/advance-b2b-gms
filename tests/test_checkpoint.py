@@ -87,22 +87,24 @@ def test_atomic_csv_append(tmp_path):
     assert lines[1] == "1,2"
 
 
-def test_mirror_is_throttled_no_rewrite_per_record(tmp_path, monkeypatch):
-    # C1: the JSON mirror must NOT be rewritten on every commit. Count calls to
-    # _write_mirror across many commits and assert it is O(n/MIRROR_EVERY).
+def test_mirror_is_ndjson_incremental(tmp_path):
+    # F30: the mirror is now an incremental NDJSON append (one line per event),
+    # not a full-table rewrite. 1200 commits -> 1200 discovered + 1200 committed
+    # = 2400 lines (linear), NOT ~2-3 full rewrites of the whole table.
     store = CheckpointStore(tmp_path / "ck.sqlite")
-    calls = {"n": 0}
-    orig = store._write_mirror
-    def counting():
-        calls["n"] += 1
-        return orig()
-    monkeypatch.setattr(store, "_write_mirror", counting)
     for i in range(1200):
         store.register_record(f"r{i}", f"k{i}", _sig(), "q", {"business_name": "A"})
         store.mark_committed(f"r{i}", i)
-    # 1200 commits with MIRROR_EVERY=500 -> only 2 or 3 mirror writes, not 2400.
-    assert calls["n"] <= 4, calls["n"]
     store.close()
+    mirror = tmp_path / "ck.json"
+    assert mirror.exists()
+    lines = mirror.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2400, len(lines)
+    # Every line is a valid JSON event with a "stage" key.
+    import json
+    for ln in lines:
+        ev = json.loads(ln)
+        assert "stage" in ev and "record_id" in ev
 
 
 def test_close_writes_final_mirror(tmp_path):
@@ -135,3 +137,24 @@ def test_csv_truncate_to_drops_tail_rows(tmp_path):
         lines = fh.read().strip().splitlines()
     assert lines == ["a,b,c", "1,2,3"]
     w.close()
+
+
+def test_row_count_handles_multiline_quoted_field(tmp_path):
+    # F16: embedded newlines in a quoted field must not inflate the row count.
+    p = tmp_path / "leads.csv"
+    w = AtomicCSVWriter(p, ["a", "b"])
+    w.append({"a": "line1\nline2", "b": "x"})
+    w.close()
+    w2 = AtomicCSVWriter(p, ["a", "b"])
+    assert w2.row_count == 1
+    w2.close()
+
+
+def test_iter_committed_rows_streams(tmp_path):
+    # F31: streaming cursor yields every committed record without materializing.
+    store = CheckpointStore(tmp_path / "ck.sqlite")
+    for i in range(100):
+        store.register_record(f"r{i}", f"k{i}", _sig(), "q", {"business_name": f"A{i}"})
+        store.mark_committed(f"r{i}", i)
+    assert sum(1 for _ in store.iter_committed_rows()) == 100
+    store.close()

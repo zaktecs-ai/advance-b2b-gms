@@ -6,8 +6,12 @@ Advance B2B GMS collects business listings from Google Maps, cleans the data,
 enriches business websites, and writes CSV/XLSX lead files. It is a command-line
 program for a Linux server or VPS.
 
-The export contains **75 producer-backed columns**. Missing values are written as
+The export contains **68 producer-backed columns**. Missing values are written as
 `N/A`; unsupported Google Maps fields are not added as empty columns.
+
+> **Python 3.11+ required.** The decision-maker name regex uses scoped inline
+> flags (`(?-i:...)`) that need Python 3.11 or newer. Install 3.11+ before
+> running.
 
 ## The simple way: use `server.sh`
 
@@ -309,7 +313,7 @@ output/houston-plumbers/
 └── checkpoint.json
 ```
 
-CSV and XLSX use the same 75-column order from `scraper/models.py`. Unsupported
+CSV and XLSX use the same 68-column order from `scraper/models.py`. Unsupported
 fields such as timezone, popular times, competitors, ownership posts, gas
 prices, featured questions, and rating buckets are intentionally excluded.
 
@@ -352,10 +356,11 @@ Stop it only when you really want to stop the run:
 ./server.sh stop
 ```
 
-### The server has an old 85-column CSV
+### The server has an old 85-column (or 75-column) CSV
 
 The current writer refuses to mix the old and new schemas. Keep the old output
-as a backup, change `job.client_name` in `config.local.yaml`, and run again:
+as a backup, change `job.client_name` in `config.local.yaml`, and run again
+(this 68-column schema is a breaking change from prior 75/85-column exports):
 
 ```bash
 ./server.sh config
@@ -428,6 +433,12 @@ quality gate → atomic CSV → checkpoint → XLSX + summary
 
 For module responsibilities, data contracts, normalization rules, failure
 handling, and extension guidance, read
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## License
+
+Original, self-contained code. Not derived from any other project.
+ling, and extension guidance, read
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## License

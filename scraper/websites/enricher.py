@@ -23,7 +23,7 @@ from ..models import resolve_website_status
 from ..signals.detector import PageContext, SignalDetector, extract_decision_maker
 from ..signals.social import detect_social, social_urls_from_html
 from ..utils.normalize import normalize_text, normalize_url
-from .crawler import crawl_priority
+from .crawler import crawl_priority, early_stop_reached
 from .fetcher import Fetcher
 from .tech_detect import TechDetector
 
@@ -52,7 +52,10 @@ class Enricher:
                  smtp_verifier: SMTPVerifier | None = None,
                  signal_detector: SignalDetector | None = None,
                  use_wappalyzer: bool = True,
-                 decision_makers: bool = False):
+                 decision_makers: bool = False,
+                 proxies_cfg=None, proxy_manager=None,
+                 exclude_selectors: list | None = None,
+                 max_email_length: int = 120):
         self._fetcher = Fetcher(timeout=timeout, proxy=proxies)
         self._max_pages = max_pages
         self._mx = mx_checker
@@ -60,6 +63,9 @@ class Enricher:
         self._signals = signal_detector or SignalDetector()
         self._tech = TechDetector(use_wappalyzer=use_wappalyzer)
         self._decision_makers = decision_makers
+        self._proxy_manager = proxy_manager
+        self._exclude_selectors = exclude_selectors
+        self._max_email_length = max_email_length
 
     def enrich(self, website: str) -> Enrichment:
         if not website or website.strip().upper() == "N/A":
@@ -95,7 +101,8 @@ class Enricher:
         # 3. Extract emails + social + tech.
         emails_raw: list[str] = []
         for h in htmls:
-            emails_raw.extend(extract_emails(h, rendered_text="", url=website))
+            emails_raw.extend(extract_emails(h, rendered_text="", url=website,
+                                             exclude_selectors=self._exclude_selectors))
         emails = clean_emails(emails_raw, website_url=website)
 
         social_urls: list[str] = []
@@ -168,29 +175,36 @@ class Enricher:
         except Exception:
             return html or ""
 
-    @staticmethod
-    def _strip_testimonials(html: str) -> str:
-        """Return page text with testimonial/review/author nodes removed.
+    def _strip_testimonials(self, html: str) -> str:
+        """Return page text with testimonial/review nodes removed.
 
-        This mirrors ``email/extract.py``'s source-context scoping so a
-        testimonial author ("…President of the local rotary club") is never
-        mistaken for the business's own decision maker (B3).
+        Mirrors ``email/extract.py`` scoping so a testimonial author is never
+        mistaken for the business's own decision maker (B3 / F33). `.author` /
+        `blockquote` / `.quote` / `cite` are intentionally not stripped from the
+        default (they hold real team bios too often).
         """
         from bs4 import BeautifulSoup
         try:
             soup = BeautifulSoup(html, "lxml")
         except Exception:
             return html or ""
-        for tag in soup.select(
-            ".testimonial,.review,.reviews,.review-body,.testimonials,"
-            "blockquote,figcaption,.comment,.comments,.wp-block-comment,"
-            ".quote,.author,cite"
-        ):
+        selectors = self._exclude_selectors or [
+            ".testimonial", ".testimonials", ".review", ".reviews",
+            ".review-body", ".comment", ".comments", ".wp-block-comment",
+            "figcaption",
+        ]
+        for tag in soup.select(",".join(selectors)):
             tag.decompose()
         return soup.get_text(" ")
 
     @staticmethod
     def _extract_scripts(html: str) -> list[str]:
+        return re.findall(
+            r"<script\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]",
+            html or "",
+            flags=re.I,
+        )
+
         return re.findall(
             r"<script\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]",
             html or "",

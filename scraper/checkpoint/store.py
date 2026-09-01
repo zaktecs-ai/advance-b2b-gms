@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS records (
     place_id TEXT,
     canonical_domain TEXT,
     normalized_phone TEXT,
+    name_key TEXT,
     city TEXT,
     source_query TEXT,
     stage TEXT NOT NULL DEFAULT 'discovered',
@@ -55,11 +56,10 @@ CREATE TABLE IF NOT EXISTS counters (
 
 
 class CheckpointStore:
-    # The JSON mirror is a convenience, human-readable snapshot, NOT the
-    # crash-safe source of truth (SQLite+WAL is). Refreshing it once per record
-    # is O(n²) total I/O, so it is written only every N records plus once at
-    # close. Live-progress tooling should read the SQLite `counters` table.
-    MIRROR_EVERY = 500
+    # The JSON mirror is a convenience, human-readable NDJSON event log, NOT the
+    # crash-safe source of truth (SQLite+WAL is). Each register/commit appends
+    # one line (F30). Live-progress tooling should read the SQLite `counters`
+    # table.
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -74,18 +74,59 @@ class CheckpointStore:
         self._json_path = self.path.with_suffix(".json")
         self._backup_path = self.path.with_name(self.path.name + ".backup.json")
         self._since_mirror = 0
+        self._migrate()
         self._load_existing()
+
+    def _migrate(self) -> None:
+        """Additive schema migration for pre-existing databases.
+
+        ``CREATE TABLE IF NOT EXISTS`` does not add columns to an already-created
+        table, so the ``name_key`` column (added for F06 dedup guards) is applied
+        here with a guarded ``ALTER TABLE``.
+        """
+        try:
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(records)")}
+        except Exception:  # pragma: no cover - defensive for a broken DB
+            return
+        if "name_key" not in cols:
+            try:
+                with self._conn:
+                    self._conn.execute("ALTER TABLE records ADD COLUMN name_key TEXT")
+            except Exception as e:  # noqa: BLE001
+                log.debug("name_key migration skipped: %s", e)
 
     # -- dedup / identity preload ------------------------------------------
     def _load_existing(self) -> None:
-        """Populate seen sets from COMMITTED records only."""
+        """Populate seen sets from COMMITTED records only.
+
+        Bounded cold-start (F32): only the most recent ``_PRELOAD_LIMIT``
+        committed rows are loaded into memory; the DB covers older history via
+        ``identity_exists`` / ``domain_name_seen`` / ``phone_name_seen``.
+        """
+        _PRELOAD_LIMIT = 50_000
         with self._lock:
             rows = self._conn.execute(
                 "SELECT identity_key, kgmid, place_id, canonical_domain, "
-                "normalized_phone, city FROM records WHERE stage='committed'"
+                "normalized_phone, name_key, city, committed_row FROM records "
+                "WHERE stage='committed' ORDER BY committed_row DESC "
+                "LIMIT ?",
+                (_PRELOAD_LIMIT,),
             ).fetchall()
         self._identities = {r["identity_key"] for r in rows if r["identity_key"]}
         self._domains = {r["canonical_domain"] for r in rows if r["canonical_domain"]}
+        # Name-key guards (F06): first name per domain / phone, applied to ALL
+        # committed records (not just weak-id ones). First-write wins so a
+        # chain's first location is the canonical name for its domain.
+        self._domain_first_name: dict[str, str] = {}
+        self._phone_first_name: dict[str, str] = {}
+        for r in rows:
+            d = r["canonical_domain"]
+            p = r["normalized_phone"]
+            nk = r["name_key"]
+            if d and nk:
+                self._domain_first_name.setdefault(d, nk)
+            if p and nk:
+                self._phone_first_name.setdefault(p, nk)
         # Fallback sets mirror the resolver: only records lacking a strong id.
         weak = [r for r in rows if not r["kgmid"] and not r["place_id"]]
         self._phones = {r["normalized_phone"] for r in weak if r["normalized_phone"]}
@@ -100,7 +141,34 @@ class CheckpointStore:
             "domains": set(self._domains),
             "phones": set(self._phones),
             "domain_city": set(self._domain_city),
+            "domain_first_name": dict(self._domain_first_name),
+            "phone_first_name": dict(self._phone_first_name),
         }
+
+    # -- indexed lookups (F32): DB covers history beyond the in-memory preload -
+    def identity_exists(self, identity_key: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM records WHERE identity_key=? AND stage='committed' "
+                "LIMIT 1", (identity_key,),
+            ).fetchone()
+        return row is not None
+
+    def domain_name_seen(self, domain: str, name_key: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM records WHERE canonical_domain=? AND name_key=? "
+                "AND stage='committed' LIMIT 1", (domain, name_key),
+            ).fetchone()
+        return row is not None
+
+    def phone_name_seen(self, phone: str, name_key: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM records WHERE normalized_phone=? AND name_key=? "
+                "AND stage='committed' LIMIT 1", (phone, name_key),
+            ).fetchone()
+        return row is not None
 
     # -- queries -------------------------------------------------------------
     def register_query(self, query: str) -> None:
@@ -150,14 +218,14 @@ class CheckpointStore:
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO records(record_id, identity_key, kgmid, place_id, "
-                "canonical_domain, normalized_phone, city, source_query, stage, raw_json, updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?, 'discovered', ?, ?)",
+                "canonical_domain, normalized_phone, name_key, city, source_query, stage, raw_json, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?, 'discovered', ?, ?)",
                 (record_id, identity_key, sig.get("kgmid"), sig.get("place_id"),
                  sig.get("canonical_domain"), sig.get("normalized_phone"),
-                 sig.get("city"), source_query, json.dumps(raw, ensure_ascii=False),
-                 time.time()),
+                 sig.get("name_key"), sig.get("city"), source_query,
+                 json.dumps(raw, ensure_ascii=False), time.time()),
             )
-        self._maybe_mirror()
+        self._append_mirror({"record_id": record_id, "stage": "discovered"})
 
     def set_stage(self, record_id: str, stage: str) -> None:
         with self._lock, self._conn:
@@ -172,21 +240,34 @@ class CheckpointStore:
                 "UPDATE records SET stage='committed', committed_row=?, updated_at=? WHERE record_id=?",
                 (row_index, time.time(), record_id),
             )
-        self._maybe_mirror()
+        self._append_mirror({"record_id": record_id, "stage": "committed",
+                             "committed_row": row_index})
 
     def committed_rows(self) -> list[dict]:
+        # Materializes every committed row into memory. Kept for tests / small
+        # datasets; the streaming `iter_committed_rows` is the production path
+        # (F31).
+        return list(self.iter_committed_rows())
+
+    def iter_committed_rows(self, batch: int = 1000):
+        """Stream committed rows as decoded dicts without loading them all.
+
+        The finalize step previously materialized the whole dataset into RAM
+        and OOM'd at ~100k records (F31). This cursor yields batches.
+        """
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT raw_json, committed_row FROM records WHERE stage='committed' "
-                "ORDER BY committed_row"
-            ).fetchall()
-        out = []
-        for r in rows:
-            try:
-                out.append(json.loads(r["raw_json"]))
-            except (json.JSONDecodeError, TypeError):
-                continue
-        return out
+            cur = self._conn.execute(
+                "SELECT raw_json FROM records WHERE stage='committed' "
+                "ORDER BY committed_row")
+            while True:
+                rows = cur.fetchmany(batch)
+                if not rows:
+                    break
+                for r in rows:
+                    try:
+                        yield json.loads(r["raw_json"])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
 
     def committed_count(self) -> int:
         """Number of COMMITTED records — the authority for valid CSV rows."""
@@ -213,32 +294,23 @@ class CheckpointStore:
         return row["value"] if row else 0
 
     # -- mirror / backup -----------------------------------------------------
-    def _maybe_mirror(self) -> None:
-        """Refresh the JSON mirror at most every MIRROR_EVERY records.
+    def _append_mirror(self, row: dict) -> None:
+        """Append one NDJSON line to the human-readable mirror.
 
-        The mirror is incremental-cost rather than per-record, turning O(n²)
-        total mirror I/O into O(n). The full authoritative snapshot is still
-        written once at close().
+        Incremental append (O(1) per event) replaces the previous full-table
+        rewrite — at 500k records that meant ~1000 full SELECT+serialize+write
+        passes (F30). SQLite remains the source of truth; the mirror is a
+        best-effort convenience only.
         """
-        self._since_mirror += 1
-        if self._since_mirror >= self.MIRROR_EVERY:
-            self._since_mirror = 0
-            self._write_mirror()
-
-    def _write_mirror(self) -> None:
         try:
-            with self._lock:
-                rows = self._conn.execute("SELECT * FROM records").fetchall()
-            data = {"records": [dict(r) for r in rows]}
-            tmp = self._json_path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(self._json_path)
+            with open(self._json_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
         except Exception as e:  # noqa: BLE001
-            log.debug("mirror write skipped: %s", e)
+            log.debug("mirror append skipped: %s", e)
 
     def close(self) -> None:
         with self._lock:
             try:
-                self._write_mirror()  # final authoritative snapshot
-            finally:
                 self._conn.close()
+            except Exception as e:  # noqa: BLE001
+                log.debug("checkpoint close: %s", e)

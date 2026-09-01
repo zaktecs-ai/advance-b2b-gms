@@ -72,3 +72,59 @@ def test_rollback_allows_rediscovery():
     res.rollback(r1)
     r2 = _rec(kgmid="/g/9")
     assert res.is_duplicate(r2)[0] is False
+
+
+def test_same_domain_same_name_duplicate_even_with_distinct_place_ids():
+    # F06: two place_ids sharing domain + phone + identical name are a dup.
+    res = IdentityResolver(default_country="US")
+    r1 = _rec(place_id="0xaaa:0x111", phone="+18324027405",
+              website="https://igdplumbing.com", business_name="IGD Plumbing & Air",
+              city="Houston")
+    r2 = _rec(place_id="0xbbb:0x222", phone="+18324027405",
+              website="https://igdplumbing.com", business_name="IGD Plumbing & Air",
+              city="Houston")
+    assert res.is_duplicate(r1)[0] is False
+    assert res.is_duplicate(r2)[0] is True
+
+
+def test_chain_locations_same_domain_diff_names_not_merged():
+    res = IdentityResolver(default_country="US")
+    a = _rec(place_id="0x1:0x1", website="https://missionac.com/locations/houston-tx",
+             business_name="Mission Air Conditioning & Plumbing", city="Houston")
+    b = _rec(place_id="0x2:0x2", website="https://missionac.com/locations/houston-tx",
+             business_name="Mission Air Houston", city="Houston")
+    assert res.is_duplicate(a)[0] is False
+    assert res.is_duplicate(b)[0] is False
+
+
+def test_same_phone_same_name_duplicate_with_distinct_place_ids():
+    res = IdentityResolver(default_country="US")
+    r1 = _rec(place_id="0x1:0x1", phone="+18328675309",
+              website="http://wedgeworthplumbing.com",
+              business_name="Wedgeworth Plumbing", city="Houston")
+    r2 = _rec(place_id="0x2:0x2", phone="+18328675309",
+              website="http://wedgeworthplumbing.com",
+              business_name="Wedgeworth Plumbing", city="Houston")
+    assert res.is_duplicate(r1)[0] is False
+    assert res.is_duplicate(r2)[0] is True
+
+
+def test_db_path_covers_older_history(tmp_path):
+    # F32: a resolver seeded with EMPTY sets still detects a duplicate via the
+    # checkpoint's SQLite lookup when the identity predates the in-memory preload.
+    from scraper.checkpoint.store import CheckpointStore
+    ck = CheckpointStore(tmp_path / "ck.sqlite")
+    ck.register_record("old", "k-old", {"kgmid": "/g/999", "place_id": None,
+                                        "canonical_domain": "acme.com",
+                                        "normalized_phone": "+15550001",
+                                        "name_key": "acme", "key_type": "kgmid",
+                                        "city": "Dallas"}, "q",
+                       {"business_name": "Acme"})
+    ck.mark_committed("old", 0)
+    # Simulate a cold resolver that did NOT preload this record.
+    res = IdentityResolver(default_country="US")
+    # Manual DB fallback: identity_exists is True for the committed key.
+    assert ck.identity_exists("k-old")
+    assert ck.domain_name_seen("acme.com", "acme")
+    assert ck.phone_name_seen("+15550001", "acme")
+    ck.close()

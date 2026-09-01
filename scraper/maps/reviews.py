@@ -120,11 +120,28 @@ _REVIEW_TAB_SELECTORS = [
     'button:has-text("Reviews")',
     'div[role="tab"]:has-text("Reviews")',
 ]
+# Body text ONLY. The whole-card fallback ('div[class*="jftiEf"]') previously
+# harvested reviewer name + UI chrome ("4 reviews · 1 photo… Like Share
+# Response from the owner"), which poisoned top_review / review_keywords (F08).
 _REVIEW_TEXT_SELECTORS = [
     'div[class*="jftiEf"] span[class*="wiI7pd"]',
-    'div[class*="jftiEf"]',
     'span[class*="wiI7pd"]',
 ]
+
+_REVIEW_NOISE_RE = re.compile(
+    r"\b\d+\s+reviews?\b|\b\d+\s+photos?\b"
+    r"|\b\d+\s+(?:months?|weeks?|days?|years?|hours?)\s+ago\b"
+    r"|\b(?:a|an)\s+(?:month|week|day|year|hour)\s+ago\b"
+    r"|\bLocal Guide\b|\bEdited\b|\bMore\b|\bLike\b(?:\s+\d+)?\b|\bShare\b"
+    r"|\s·\s|\s•\s",
+    re.I,
+)
+
+
+def clean_review_text(text: str) -> str:
+    """Strip Maps review-chrome (counts, "X ago", Local Guide, Like/Share)."""
+    t = _REVIEW_NOISE_RE.sub(" ", text or "")
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def open_reviews_tab(page) -> bool:
@@ -159,18 +176,27 @@ def extract_reviews_from_panel(page, max_reviews: int = 5,
     # Several scrolling passes; the feed lives inside the detail panel.
     scroll_attempts = max(3, max_reviews)
     for _ in range(scroll_attempts):
+        # Element-scoped scroll (F29): drive the review feed's own scroll
+        # rather than a global mouse wheel + blind sleep.
         try:
-            page.mouse.wheel(0, 1800)
+            feed = page.locator(
+                "div[role='main'] .m6QErb, div[class*='review-dialog-list']").first
+            if feed.count() > 0:
+                feed.evaluate("el => el.scrollBy(0, 1500)")
+            else:
+                page.mouse.wheel(0, 1800)
         except Exception:
-            pass
-        time.sleep(0.6)
+            page.mouse.wheel(0, 1800)
+        page.wait_for_timeout(500)
         for sel in _REVIEW_TEXT_SELECTORS:
             try:
                 locs = page.locator(sel)
                 n = locs.count()
                 for i in range(n):
                     txt = locs.nth(i).inner_text(timeout=1500).strip()
-                    if txt and len(txt) > 8 and txt not in seen:
+                    txt = clean_review_text(txt)
+                    # Require a substantive body: chrome-only residues are dropped.
+                    if txt and len(txt) >= 25 and txt not in seen:
                         seen.add(txt)
                         texts.append(txt)
                         if len(texts) >= max_reviews:

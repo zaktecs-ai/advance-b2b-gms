@@ -96,3 +96,9 @@ def test_clean_rejects_off_domain_by_default():
     # proprietor legitimately lists a Gmail).
     out2 = clean_emails(["owner@gmail.com"], website_url="https://acme.com")
     assert out2 == ["owner@gmail.com"]
+
+
+def test_prose_at_dot_not_decoded():
+    # F17: prose "at/dot" must NOT be decoded into a fake email.
+    from scraper.email.extract import extract_emails_from_text
+    assert extract_emails_from_text("Order now at shop dot com and save") == []

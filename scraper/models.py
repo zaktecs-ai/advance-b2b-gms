@@ -15,14 +15,19 @@ from typing import Any
 
 # Canonical output column order — THE single source of truth for exports.
 OUTPUT_COLUMNS: list[str] = [
-    # --- Identity (kgmid is the authoritative, never-null key) ---
-    "kgmid", "place_id", "cid", "business_name", "category", "subcategory",
+    # --- Identity ---
+    # NOTE: `kgmid` and `cid` are REMOVED from the export by operator decision
+    # (they carry no independent B2B value in the CSV; kgmid duplicates
+    # place_id at the row level). `kgmid` REMAINS the internal dedup top key —
+    # see scraper/dedup/dedup.py and scraper/checkpoint/store.py. Do not
+    # re-add without updating those consumers and the 68-column contract.
+    "place_id", "business_name", "category",
     "phone", "phone_international", "website", "address", "full_address",
     "city", "state", "postal_code", "country", "latitude", "longitude",
     "plus_code", "google_maps_url",
     # --- Maps intelligence ---
     "rating", "review_count", "claimed_status", "business_status",
-    "business_hours", "business_description", "about",
+    "business_hours", "business_description",
     # --- Provenance ---
     "source_query", "source_location", "source_keyword",
     # --- Website intelligence ---
@@ -43,10 +48,10 @@ OUTPUT_COLUMNS: list[str] = [
     # --- Decision-maker enrichment ---
     "decision_maker_name", "decision_maker_title",
     # --- Verification ---
-    "mx_enabled", "mx_status", "mx_reason",
-    "smtp_enabled", "smtp_status", "smtp_reason",
+    "mx_status", "mx_reason",
+    "smtp_status", "smtp_reason",
     # --- Housekeeping ---
-    "filtered_out_reason", "record_id",
+    "record_id",
 ]
 
 

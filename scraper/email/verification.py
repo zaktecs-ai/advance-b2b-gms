@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
 import threading
 import uuid
 
@@ -160,9 +161,15 @@ class SMTPVerifier:
                     return "Connection Failed", f"greeting_{code}"
                 smtp.ehlo()
                 if smtp.has_extn("starttls"):
-                    smtp.starttls()
+                    # Use an explicit default SSL context rather than relying on
+                    # smtplib's optional context (F23).
+                    smtp.starttls(context=ssl.create_default_context())
                     smtp.ehlo()
-                smtp.mail(self.from_email)
+                # Check the MAIL FROM response instead of discarding it — a
+                # rejected sender means the check is inconclusive, not verified.
+                code, _resp = smtp.mail(self.from_email)
+                if code != 250:
+                    return "Inconclusive", f"mail_from_{code}"
                 code, _resp = smtp.rcpt(email)
                 if code == 250:
                     return self._catch_all_probe(smtp, email)

@@ -22,6 +22,7 @@ from typing import Iterator
 from urllib.parse import quote_plus
 
 from ..signals.social import detect_social
+from .parsing import parse_google_maps_url
 from .reviews import extract_reviews_from_panel
 from .transform import (
     apply_url_identity,
@@ -201,25 +202,90 @@ def _extract_hours(page) -> str:
     return "N/A"
 
 
+# Internal/utility href tokens that must never be treated as a business's own
+# social profile. Google's own place/dir/search URLs dominate the surrounding
+# results feed and previously cross-contaminated the facebook column (F01).
+_FORBIDDEN_HREF_TOKENS = ("google.com/maps/place/", "/maps/dir/",
+                          "google.com/maps/search/")
+
+
+def filter_panel_hrefs(hrefs: list[str]) -> list[str]:
+    """Drop Google Maps navigation URLs from a candidate social-link set.
+
+    Pure helper so scoping is unit-testable without a browser.
+    """
+    return [h for h in (hrefs or [])
+            if h and not any(tok in h for tok in _FORBIDDEN_HREF_TOKENS)]
+
+
 def _extract_social_links(page) -> dict:
-    """Read anchor hrefs from the live panel; classify them in pure code."""
-    try:
-        hrefs = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
-    except Exception:
-        hrefs = []
-    return detect_social([href for href in hrefs if href])
+    """Read anchors ONLY from the open detail panel; classify in pure code."""
+    hrefs: list[str] = []
+    for sel in ('div[role="main"] div[role="complementary"] a[href]',
+                'div[role="main"] a[href]'):
+        try:
+            loc = page.locator(sel)
+            n = loc.count()
+            if n:
+                hrefs = [loc.nth(i).get_attribute("href") or "" for i in range(n)]
+                break
+        except Exception as e:
+            log.debug("social panel scope miss: %s (%s)", sel, e)
+    return detect_social(filter_panel_hrefs(hrefs))
+
+
+# Generic category/service words that appear in the slug AND the query keyword
+# but carry no identity signal. Excluding them keeps the panel/URL coherence
+# check discriminating ("Cooper Plumbing" vs "Nick's Plumbing" both contain
+# "plumbing" but are clearly different businesses).
+_NAME_GENERIC_WORDS = {
+    "plumbing", "plumber", "plumbers", "heating", "cooling", "air",
+    "conditioning", "electric", "electrical", "service", "services",
+    "company", "the", "and", "repair", "repairs", "contractor",
+    "contractors", "llc", "inc",
+}
+
+
+def _names_compatible(a: str, b: str) -> bool:
+    """True when two name strings share at least one significant token.
+
+    Used to detect a panel/URL mismatch (the one-row-shift bug): the business
+    name read from the detail panel must share a word with the slug in its own
+    URL. Generic service words are ignored; empty side → assume compatible.
+    """
+    def _tokens(s: str) -> set[str]:
+        return {
+            t for t in re.findall(r"[a-z0-9]+", (s or "").lower())
+            if len(t) > 2 and t not in _NAME_GENERIC_WORDS
+        }
+    ta = _tokens(a)
+    tb = _tokens(b)
+    if not ta or not tb:
+        return True
+    return len(ta & tb) >= 1
+
+
+def digits_to_intl(raw: str) -> str:
+    """Normalize a scraped phone attribute to international form.
+
+    Pure helper so the transformation is unit-testable without a browser. A
+    ``+...`` international fragment is preserved as-is; a bare digit run gets
+    a leading ``+``; anything else is ``N/A``. (Previously ``re.sub(r"\\D", …)``
+    could never yield a leading ``+``, so the ``startswith("+")`` check was a
+    dead branch.)
+    """
+    raw = (raw or "").strip()
+    m = re.search(r"\+[\d\s().-]+", raw)
+    if m:
+        digits = re.sub(r"[^\d+]", "", m.group(0))
+        return digits if digits else "N/A"
+    digits = re.sub(r"\D", "", raw)
+    return ("+" + digits) if digits else "N/A"
 
 
 def _extract_phone_international(page) -> str:
     raw = _first_attr(page, PHONE_SELECTORS[0], "data-item-id") or ""
-    m = re.search(r"\+[\d\s().-]+", raw)
-    if m:
-        return re.sub(r"[^\d+]", "", m.group(0))
-    if raw:
-        digits = re.sub(r"\D", "", raw)
-        if digits:
-            return ("+" + digits) if not digits.startswith("+") else digits
-    return "N/A"
+    return digits_to_intl(raw)
 
 
 class MapsCollector:
@@ -255,82 +321,95 @@ class MapsCollector:
         pass
 
     def collect(self, query: str) -> Iterator[dict]:
+        # Create the context OUTSIDE try/finally is a leak when page creation
+        # fails; wrap everything so a failure at any point still tears the
+        # context down (F14).
         ctx = self._bm.new_context()
-        page = ctx.new_page()
-        page.set_default_timeout(self._bm.nav_timeout_ms)
+        try:
+            page = ctx.new_page()
+            try:
+                page.set_default_timeout(self._bm.nav_timeout_ms)
+                yield from self._collect_on_page(query, page)
+            finally:
+                try:
+                    page.close()
+                except Exception as e:
+                    log.debug("page close: %s", e)
+        finally:
+            try:
+                ctx.close()
+            except Exception as e:
+                log.debug("ctx close: %s", e)
+
+    def _collect_on_page(self, query: str, page) -> Iterator[dict]:
         url = _with_region(MAPS_SEARCH_URL.format(query=quote_plus(query)),
                            self._hl, self._gl)
         yielded = 0
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        # Wait for the results feed (or a heading) instead of a blind sleep
+        # so a slow network no longer drops data (F29).
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            page.wait_for_selector('div[role="feed"], h1', timeout=15_000)
+        except Exception:
+            time.sleep(2.0)
+
+        if handle_consent_wall(page):
             time.sleep(3.0)
 
-            if handle_consent_wall(page):
-                time.sleep(3.0)
+        if detect_bot_challenge(page.content()):
+            log.warning("bot challenge for query %r — cooling down %.0fs",
+                        query, self._cooldown)
+            # A bot challenge often means the egress IP (proxy) is flagged;
+            # feed that back so the proxy drops out of rotation (A3).
+            try:
+                self._bm.report_proxy_failure()
+            except Exception:
+                pass
+            if self._cooldown:
+                time.sleep(self._cooldown)
+            raise ZeroListingsError(query, "bot challenge / CAPTCHA detected")
 
-            if detect_bot_challenge(page.content()):
-                log.warning("bot challenge for query %r — cooling down %.0fs",
-                            query, self._cooldown)
-                # A bot challenge often means the egress IP (proxy) is flagged;
-                # feed that back so the proxy drops out of rotation (A3).
-                try:
-                    self._bm.report_proxy_failure()
-                except Exception:
-                    pass
-                if self._cooldown:
-                    time.sleep(self._cooldown)
-                raise ZeroListingsError(query, "bot challenge / CAPTCHA detected")
+        self._scroll_results(page)
+        listing_links = self._extract_listing_links(page)
+        log.info("query %r: found %d listing place URLs", query, len(listing_links))
 
-            self._scroll_results(page)
-            listing_links = self._extract_listing_links(page)
-            log.info("query %r: found %d listing place URLs", query, len(listing_links))
+        if not listing_links:
+            try:
+                body_text = page.locator("body").inner_text(timeout=2000).lower()
+            except Exception:
+                body_text = ""
+            if "no results" in body_text or "could not find" in body_text:
+                log.info("query %r has genuinely no results — done", query)
+                return
+            raise ZeroListingsError(query, _page_diagnostic(page))
 
-            if not listing_links:
-                try:
-                    body_text = page.locator("body").inner_text(timeout=2000).lower()
-                except Exception:
-                    body_text = ""
-                if "no results" in body_text or "could not find" in body_text:
-                    log.info("query %r has genuinely no results — done", query)
-                    return
-                raise ZeroListingsError(query, _page_diagnostic(page))
+        # Notify the caller of the total number of result cards found, so
+        # progress can render a "processing 12 of 96" style counter.
+        if self._on_query_total is not None:
+            try:
+                self._on_query_total(len(listing_links))
+            except Exception:
+                pass
 
-            # Notify the caller of the total number of result cards found, so
-            # progress can render a "processing 12 of 96" style counter.
-            if self._on_query_total is not None:
-                try:
-                    self._on_query_total(len(listing_links))
-                except Exception:
-                    pass
-
-            for pos, place_url in enumerate(listing_links, start=1):
-                if self._max_total and self._yielded_total >= self._max_total:
-                    self.limit_reached = True
-                    break
-                if self._max_per_query and yielded >= self._max_per_query:
-                    break
-                data = self._open_and_extract(page, place_url, position=pos,
-                                              total=len(listing_links))
-                if not data.get("business_name"):
-                    data["business_name"] = fallback_business_name(place_url)
-                data["source_query"] = query
-                status = (data.get("business_status") or "").lower()
-                if ("permanently closed" in status) and not self._include_closed:
-                    continue
-                yielded += 1
-                self._yielded_total += 1
-                yield data
-                self._small_pause()
-                self._maps_pacing_pause()
-        finally:
-            # Teardown each resource under its own guard so one failure
-            # (e.g. a hung renderer raising in page.close) cannot strand the
-            # context and leak its child processes (A6).
-            for closer in (page.close, ctx.close):
-                try:
-                    closer()
-                except Exception as e:
-                    log.debug("teardown error: %s", e)
+        for pos, place_url in enumerate(listing_links, start=1):
+            if self._max_total and self._yielded_total >= self._max_total:
+                self.limit_reached = True
+                break
+            if self._max_per_query and yielded >= self._max_per_query:
+                break
+            data = self._open_and_extract(page, place_url, position=pos,
+                                          total=len(listing_links))
+            if not data.get("business_name"):
+                data["business_name"] = fallback_business_name(place_url)
+            data["source_query"] = query
+            status = (data.get("business_status") or "").lower()
+            if ("permanently closed" in status) and not self._include_closed:
+                continue
+            yielded += 1
+            self._yielded_total += 1
+            yield data
+            self._small_pause()
+            self._maps_pacing_pause()
 
     # -- click-driven detail-panel extraction -----------------------------
     def _open_and_extract(self, page, place_url: str, position: int = 0,
@@ -344,7 +423,14 @@ class MapsCollector:
                 page.goto(_with_region(place_url, self._hl, self._gl),
                           wait_until="domcontentloaded",
                           timeout=self._bm.nav_timeout_ms)
-                time.sleep(1.5)
+                # Wait for the detail panel (or a heading) to hydrate instead of
+                # a blind sleep, so a slow switch cannot drop the panel text
+                # (F02/F29).
+                try:
+                    page.wait_for_selector('div[role="feed"], h1, div[role="main"]',
+                                           timeout=15_000)
+                except Exception:
+                    time.sleep(1.5)
             except Exception as e:  # A5: log so a failed goto isn't silently N/A
                 log.debug("goto fallback failed for %s: %s", place_url, e)
                 try:
@@ -357,10 +443,26 @@ class MapsCollector:
             page.wait_for_selector('h1', timeout=10_000)
         except Exception as e:
             log.debug("detail-panel h1 wait missed for %s: %s", place_url, e)
-        # Wait for the detail panel to hydrate on a concrete marker instead of a
-        # blind sleep (A4). Unbounded condition-waits can hang on Maps'
-        # persistent connections, so this is a bounded wait on a real panel
-        # element with a short fallback sleep for slow SPA hydration.
+        # Panel identity guard: prove the detail panel belongs to the clicked
+        # place before reading its fields. On a slow switch the panel still
+        # shows the PREVIOUS business, which is the exact one-row-shift
+        # contamination seen in production (F02).
+        expected_slug = (parse_google_maps_url(place_url).get("place_name") or "")
+        try:
+            page.wait_for_function(
+                """slug => {
+                    const h = document.querySelector('h1');
+                    if (!h || !h.textContent.trim()) return false;
+                    if (!slug) return true;
+                    const key = decodeURIComponent(slug).toLowerCase()
+                        .replace(/[-+]/g, ' ').split(/\\s+/)
+                        .filter(t => t.length > 2)[0] || '';
+                    return !key || h.textContent.trim().toLowerCase().includes(key);
+                }""",
+                arg=expected_slug, timeout=6_000)
+        except Exception:
+            log.debug("panel identity guard timeout for %s", place_url)
+        # Bounded wait on the panel name marker instead of a blind sleep (A4).
         try:
             page.wait_for_selector(NAME_SELECTORS[0], timeout=5_000)
         except Exception:
@@ -400,6 +502,26 @@ class MapsCollector:
 
         data["google_maps_url"] = page.url
         apply_url_identity(data, page.url)
+
+        # Coherence sentinel: the panel's business name must share a token with
+        # the URL's place slug. On a mismatch the panel still shows the previous
+        # business, so retry once via the goto fallback before yielding
+        # contaminated data (F02).
+        url_name = (parse_google_maps_url(place_url).get("place_name") or "")
+        if not _names_compatible(url_name, data.get("business_name") or ""):
+            log.warning("panel/URL name mismatch for %s — retrying via goto", place_url)
+            try:
+                page.goto(_with_region(place_url, self._hl, self._gl),
+                          wait_until="domcontentloaded",
+                          timeout=self._bm.nav_timeout_ms)
+                try:
+                    page.wait_for_selector('h1, div[role="feed"], div[role="main"]',
+                                           timeout=15_000)
+                except Exception:
+                    time.sleep(1.5)
+                data["business_name"] = _first_text(page, NAME_SELECTORS)
+            except Exception as e:
+                log.debug("coherence retry failed for %s: %s", place_url, e)
         return data
 
     def _click_to_open(self, page, place_url: str) -> bool:
@@ -411,8 +533,15 @@ class MapsCollector:
                     href = locs.nth(i).get_attribute("href", timeout=1500)
                     if href and href == place_url:
                         locs.nth(i).click(timeout=5000)
-                        time.sleep(1.0)
-                        return True
+                        # Prove the detail panel switched to the clicked place
+                        # (URL changed) instead of sleeping blindly (F02).
+                        try:
+                            page.wait_for_function(
+                                "href => location.href.includes(decodeURIComponent(href))",
+                                arg=place_url, timeout=8_000)
+                            return True
+                        except Exception:
+                            return False
             except Exception as e:
                 log.debug("click-to-open miss: %s (%s)", sel, e)
         return False

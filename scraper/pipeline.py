@@ -32,6 +32,7 @@ from .export.xlsx_writer import write_xlsx
 from .filters.engine import evaluate, split_filters
 from .maps.collector import MapsCollector
 from .maps.geo import geojson_polygons, point_in_any_polygon
+from .maps.reviews import filter_reviews
 from .maps.transform import normalize_listing
 from .models import OUTPUT_COLUMNS
 from .signals.social import detect_social
@@ -62,10 +63,11 @@ def _make_record_id(raw: dict) -> str:
 
 class Pipeline:
     def __init__(self, config: AppConfig, collector: MapsCollector | None = None,
-                 browser_manager=None, progress=None):
+                 browser_manager=None, progress=None, proxy_manager=None):
         self.cfg = config
         self.collector = collector
         self._bm = browser_manager
+        self._proxy_manager = proxy_manager
         from .utils.progress import NullProgress
         self._progress = progress or NullProgress()
         out_dir = Path(config.job.output_dir) / config.job.client_name
@@ -80,6 +82,8 @@ class Pipeline:
             seen_domains=seeds["domains"],
             seen_phones=seeds["phones"],
             seen_domain_city=seeds["domain_city"],
+            domain_first_name=seeds.get("domain_first_name"),
+            phone_first_name=seeds.get("phone_first_name"),
             default_country=config.job.default_country,
         )
 
@@ -94,13 +98,22 @@ class Pipeline:
         )
 
         max_pages = config.website.max_pages_per_site
+        # Thread the proxy through to the httpx fetcher so enrichment traffic
+        # (the bulk of requests) leaves from the configured proxy, not the
+        # server's real IP (F27).
+        proxy_url = (proxy_manager.httpx_proxy() if proxy_manager is not None
+                     else None)
         self.enricher = Enricher(
             timeout=config.website.http_read_timeout_seconds,
             max_pages=max_pages,
+            proxies=proxy_url,
             mx_checker=self.mx_checker,
             smtp_verifier=self.smtp_verifier,
             use_wappalyzer=config.website.use_wappalyzer,
             decision_makers=config.enrichment.decision_makers,
+            proxy_manager=proxy_manager,
+            exclude_selectors=config.enrichment.exclude_selectors,
+            max_email_length=config.email.max_email_length,
         )
 
         # LLM personalized hook generator (optional, auto-detects API key).
@@ -227,12 +240,27 @@ class Pipeline:
         recs = [r for r, _ in batch]
         if workers > 1 and len(recs) > 1:
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                list(ex.map(self._enrich_and_stage, recs))
+                list(ex.map(self._safe_enrich, recs))
         else:
             for rec in recs:
-                self._enrich_and_stage(rec)
+                self._safe_enrich(rec)
         for rec, sig in batch:
             self._commit_stage(rec, query, sig)
+
+    def _safe_enrich(self, rec: dict) -> None:
+        """Enrich one record without letting a single failure abort the batch.
+
+        ``ex.map`` re-raises the first worker exception, which previously
+        marked the whole query failed and triggered a full re-scrape (F26).
+        """
+        try:
+            self._enrich_and_stage(rec)
+        except Exception as e:  # noqa: BLE001
+            log.exception("enrich failed for %s", rec.get("business_name"))
+            rec["website_status"] = "UNKNOWN"
+            rec["website_failure_reason"] = f"enrich_error:{type(e).__name__}"
+            rec.setdefault("emails", "N/A")
+            rec.setdefault("email_count", 0)
 
     def _enrich_and_stage(self, rec: dict) -> None:
         """Parallel-safe, record-local mutation: enrich + analyze + LLM hook.
@@ -310,26 +338,40 @@ class Pipeline:
         enr = self.enricher.enrich(website)
         rec["website_status"] = enr.website_status
         rec["website_failure_reason"] = enr.failure_reason or "N/A"
-        rec["emails"] = ",".join(enr.emails) if enr.emails else "N/A"
-        rec["email_count"] = len(enr.emails)
+        # Feed transient failures back to the proxy so a dead endpoint drops
+        # out of rotation (F27).
+        if (self._proxy_manager is not None
+                and enr.failure_reason in ("HTTP_BLOCKED", "TIMEOUT")):
+            try:
+                self._proxy_manager.report_failure(
+                    self._proxy_manager.httpx_proxy())
+            except Exception:
+                pass
+        # Honor the enrichment toggles (F25): a disabled stage leaves its
+        # columns at the producer default instead of being overwritten.
+        if self.cfg.enrichment.emails:
+            rec["emails"] = ",".join(enr.emails) if enr.emails else "N/A"
+            rec["email_count"] = len(enr.emails)
         rec["decision_maker_name"] = enr.decision_maker_name or "N/A"
         rec["decision_maker_title"] = enr.decision_maker_title or "N/A"
 
         # Social links (merge website-discovered with any Maps-discovered).
-        merged_social = detect_social(
-            [rec.get(c) for c in _SOCIAL_COLS if rec.get(c) not in (None, "N/A", "")])
-        for c in _SOCIAL_COLS:
-            if merged_social.get(c) and merged_social[c] != "N/A":
-                rec[c] = merged_social[c]
-            elif enr.social.get(c) and enr.social[c] != "N/A":
-                rec[c] = enr.social[c]
+        if self.cfg.enrichment.social:
+            merged_social = detect_social(
+                [rec.get(c) for c in _SOCIAL_COLS if rec.get(c) not in (None, "N/A", "")])
+            for c in _SOCIAL_COLS:
+                if merged_social.get(c) and merged_social[c] != "N/A":
+                    rec[c] = merged_social[c]
+                elif enr.social.get(c) and enr.social[c] != "N/A":
+                    rec[c] = enr.social[c]
 
         # Tech columns (string values from the tech detector).
-        for c in _TECH_COLS:
-            rec[c] = enr.tech.get(c, "N/A")
-        # tag_manager (string) + gtm (YES/NO) both exist; map each correctly.
-        rec["tag_manager"] = enr.tech.get("tag_manager", "N/A")
-        rec["tech_stack"] = enr.tech.get("tech_stack", "N/A") or "N/A"
+        if self.cfg.enrichment.tech_detect:
+            for c in _TECH_COLS:
+                rec[c] = enr.tech.get(c, "N/A")
+            # tag_manager (string) + gtm (YES/NO) both exist; map each correctly.
+            rec["tag_manager"] = enr.tech.get("tag_manager", "N/A")
+            rec["tech_stack"] = enr.tech.get("tech_stack", "N/A") or "N/A"
 
         # Boolean tech columns from the signal detector (YES/NO).
         for c in _BOOL_TECH_COLS:
@@ -341,17 +383,23 @@ class Pipeline:
             rec[c] = enr.signals.get(c, "NO")
 
         # MX / SMTP verification for the first extracted email (native).
+        # `mx_enabled` / `smtp_enabled` were removed from the export (schema
+        # section 4): `mx_status`=Not Checked already conveys "disabled".
         if enr.emails and (self.cfg.enrichment.mx_verify or self.cfg.enrichment.smtp_verify):
             ver = self.enricher.verify_email(enr.emails[0])
             rec["mx_status"] = ver["mx_status"]
             rec["mx_reason"] = ver["mx_reason"]
             rec["smtp_status"] = ver["smtp_status"]
             rec["smtp_reason"] = ver["smtp_reason"]
-        rec["mx_enabled"] = "true" if self.cfg.enrichment.mx_verify else "false"
-        rec["smtp_enabled"] = "true" if self.cfg.enrichment.smtp_verify else "false"
 
     def _analyze(self, rec: dict) -> None:
         reviews = [r for r in (rec.get("_reviews") or []) if r]
+        # Honor reviews.min_len / max_len (F25).
+        reviews = filter_reviews(
+            reviews,
+            min_len=self.cfg.reviews.min_len,
+            max_len=self.cfg.reviews.max_len,
+        )
         if not reviews and rec.get("top_review") not in (None, "N/A", ""):
             reviews = [rec["top_review"]]
         a = analyze(reviews, rating=rec.get("rating"),
@@ -375,15 +423,37 @@ class Pipeline:
             rec["pitch_hook"] = hook
 
     def _finalize(self) -> None:
-        self.csv.close()
+        # Write the XLSX + summary while the checkpoint is still open, then
+        # tear everything down through the shared idempotent close().
         try:
-            rows = self.checkpoint.committed_rows()
-            write_xlsx(self.out_dir / "leads.xlsx", OUTPUT_COLUMNS, rows)
+            write_xlsx(self.out_dir / "leads.xlsx", OUTPUT_COLUMNS,
+                       self.checkpoint.iter_committed_rows())
         except Exception as e:  # noqa: BLE001
             log.warning("xlsx write skipped: %s", e)
         write_summary(self.out_dir / "summary.json", self.counters)
-        self.enricher.close()
-        self.checkpoint.close()
+        self.close()
+
+    def close(self) -> None:
+        """Idempotent teardown: CSV → enricher → checkpoint → collector.
+
+        Called from ``_finalize`` AND from ``main``'s ``finally`` so a run that
+        raises still releases every resource (F28).
+        """
+        if self.csv is not None:
+            try:
+                self.csv.close()
+            except Exception as e:
+                log.debug("csv close: %s", e)
+        if getattr(self, "enricher", None) is not None:
+            try:
+                self.enricher.close()
+            except Exception as e:
+                log.debug("enricher close: %s", e)
+        if getattr(self, "checkpoint", None) is not None:
+            try:
+                self.checkpoint.close()
+            except Exception as e:
+                log.debug("checkpoint close: %s", e)
         if self.collector is not None:
             try:
                 self.collector.close()

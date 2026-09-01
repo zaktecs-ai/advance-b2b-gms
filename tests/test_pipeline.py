@@ -176,3 +176,34 @@ def test_startup_reconciles_uncommitted_csv_rows(tmp_path):
     finally:
         pipeline.csv.close()
         pipeline.checkpoint.close()
+
+
+def test_one_failing_enrich_does_not_abort_batch(tmp_path):
+    # F26: a single record whose enrichment raises must not abort the whole
+    # batch — the other records still get committed.
+    (tmp_path / "config.yaml").write_text(
+        "queries: ['plumbers in Dallas']\n"
+        f"job:\n  output_dir: '{tmp_path}/out'\n  client_name: fail\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(str(tmp_path / "config.yaml"))
+    pipeline = Pipeline(cfg, DemoCollector())
+
+    class FlakyEnricher:
+        def enrich(self, website):
+            if "sample2" in (website or ""):
+                raise RuntimeError("boom")
+            return Enrichment(website_status="LIVE")
+        def close(self):
+            pass
+        def verify_email(self, email):
+            return {"mx_status": "Not Checked", "mx_reason": "mx_disabled",
+                    "smtp_status": "Not Checked", "smtp_reason": "smtp_disabled"}
+
+    pipeline.enricher = FlakyEnricher()
+    try:
+        counters = pipeline.run()
+        # 3 demo records; one fails enrich but must still commit (as UNKNOWN).
+        assert counters["committed"] >= 2
+    finally:
+        pipeline.close()

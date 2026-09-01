@@ -80,3 +80,39 @@ def test_extract_decision_maker_keeps_real():
     assert extract_decision_maker("John Smith, CEO of Acme Plumbing") == ("John Smith", "CEO")
     assert extract_decision_maker("Our team is led by Jane Doe, Managing Director") == (
         "Jane Doe", "Managing Director")
+
+
+def test_no_decision_maker_from_production_false_positives():
+    # F07: the real production false-positive rows must now resolve to ("", "").
+    assert extract_decision_maker("Email Wayne William A, Manager for bookings.") == ("", "")
+    assert extract_decision_maker("Meet Hugo — Founder of a friendlier plumbing visit.") == ("", "")
+    assert extract_decision_maker("Main Sponsor — Founder Tier") == ("", "")
+    assert extract_decision_maker("Texans. Co — Founder") == ("", "")
+    assert extract_decision_maker("Jack Gilbert Jack Gilbert, president") == ("", "")
+
+
+def test_vice_president_title_not_split():
+    # F07: "Vice President" is one title token, so Villalobos resolves cleanly.
+    name, title = extract_decision_maker("BRANDON VILLALOBOS, Vice President of Operations")
+    assert name == "BRANDON VILLALOBOS" and title == "Vice President"
+
+
+def test_real_decision_makers_still_detected():
+    assert extract_decision_maker("Alan O'Neill, CEO") == ("Alan O'Neill", "CEO")
+    assert extract_decision_maker("John Smith, CEO of Acme Plumbing") == ("John Smith", "CEO")
+
+
+def test_segment_rejection_not_substring():
+    # F18: reject by first path segment, not raw substring.
+    assert platform_for_url("https://www.instagram.com/natgeo/travel/") == "instagram"
+    assert platform_for_url("https://www.facebook.com/tr") is None
+    assert platform_for_url("https://www.facebook.com/SharedOfficeSpace") == "facebook"
+
+
+def test_keyword_word_boundaries():
+    # F19: "licensed" must not match "unlicensed".
+    from scraper.signals.detector import detect_signals
+    ctx = PageContext(text="We are UNLICENSED contractors.", html="", urls=[], scripts=[])
+    assert detect_signals(ctx)["licensed_insured"][0] is False
+    ctx2 = PageContext(text="Licensed and insured team.", html="", urls=[], scripts=[])
+    assert detect_signals(ctx2)["licensed_insured"][0] is True

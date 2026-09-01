@@ -41,6 +41,21 @@ _SIGNAL_DEFS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _kw_in_blob(kw: str, blob: str) -> bool:
+    """Word-boundary match for single-word keywords.
+
+    A bare substring check makes ``licensed`` match ``unlicensed`` (F19).
+    Multi-word phrases match as substrings; intentional single words require a
+    word boundary so a negation/compound is not falsely detected.
+    """
+    kw = (kw or "").strip().lower()
+    if not kw:
+        return False
+    if " " in kw:
+        return kw in blob
+    return re.search(rf"\b{re.escape(kw)}\b", blob) is not None
+
+
 def detect_signals(ctx: PageContext, custom: dict | None = None) -> dict:
     """Return {signal_name: (detected, evidence)} for built-in + custom."""
     blob = "\n".join([ctx.text or "", ctx.html or "",
@@ -48,7 +63,7 @@ def detect_signals(ctx: PageContext, custom: dict | None = None) -> dict:
     results: dict = {}
     for name, keywords in _SIGNAL_DEFS.items():
         for kw in keywords:
-            if kw in blob:
+            if _kw_in_blob(kw, blob):
                 results[name] = (True, kw)
                 break
         else:
@@ -178,7 +193,7 @@ def _advertising(ctx):
 def _kw_signal(ctx, keywords):
     blob = (ctx.text or "").lower() + " " + (ctx.html or "").lower()
     for kw in keywords:
-        if kw in blob:
+        if _kw_in_blob(kw, blob):
             return True, kw
     return False, None
 
@@ -234,7 +249,8 @@ class SignalDetector:
 
 _TITLE_PATTERN = (
     r"CEO|Chief Executive Officer|Founder|Co-Founder|Owner|President|"
-    r"Managing Director|Principal|Partner|Manager|Director|Proprietor"
+    r"Vice President|Managing Director|Principal|Partner|Manager|Director|"
+    r"Proprietor|General Manager"
 )
 _TITLE_RE = re.compile(rf"\b({_TITLE_PATTERN})\b", re.I)
 # The name portion is deliberately case-SENSITIVE (title-case tokens) so that
@@ -242,6 +258,9 @@ _TITLE_RE = re.compile(rf"\b({_TITLE_PATTERN})\b", re.I)
 _NAME_RE = re.compile(
     r"\b(?:[A-ZÀ-ÖØ-Ý][\w'’.-]*)(?:\s+[A-ZÀ-ÖØ-Ý][\w'’.-]*){1,3}\b"
 )
+# The scoped inline flag syntax `(?-i:...)` requires Python >= 3.11
+# (mirrored in `pyproject.toml`'s `requires-python`). Do not lower the pin
+# without replacing these scoped flags with a compatible construct.
 _NAME_TITLE_RE = re.compile(
     rf"(?P<name>(?-i:{_NAME_RE.pattern}))\s*[,;:\-–—]\s*"
     rf"(?P<title>{_TITLE_PATTERN})\b|"
@@ -250,6 +269,22 @@ _NAME_TITLE_RE = re.compile(
     re.I,
 )
 
+
+# Non-person words that must never be captured as a name, plus the CTA verbs
+# that glue onto a real-name match in footer text ("Email Wayne…", "Meet Hugo").
+_NAME_CTA_PREFIX_RE = re.compile(
+    r"^(?:email|call|contact|meet|ask|talk to|message|reach|hire)\s+"
+    r"(?:to\s+|our\s+|the\s+)?", re.I)
+_NAME_NOT_PERSON_WORDS = {
+    "sponsor", "sponsors", "main", "team", "staff", "company", "llc",
+    "inc", "co", "plumbing", "plumbers", "services", "service",
+    "group", "about", "us", "me", "him", "her", "them",
+}
+# Names that END in a title word were forged from a split title ("…Villalobos
+# Vice / PRESIDENT") or a glued CTA; reject them.
+_TITLE_WORDS = {"ceo", "president", "manager", "director", "founder",
+                "owner", "partner", "principal", "proprietor", "vice",
+                "chief", "officer"}
 
 _NAME_STOPWORDS = {
     "terms", "term", "service", "services", "privacy", "policy", "policies",
@@ -267,6 +302,12 @@ def _clean_person_name(value: str) -> str:
     cleaned = normalize_text(value).strip(" ,;:-–—")
     if cleaned == "N/A":
         return cleaned
+    # A CTA verb glued to the front of a name ("Email Wayne…", "Meet Hugo…") is
+    # footer marketing copy, not evidence of a decision maker — reject it
+    # outright rather than stripping (after stripping, a multi-word CTA like
+    # "Email Wayne William A" would still look name-shaped). (F07)
+    if _NAME_CTA_PREFIX_RE.search(cleaned):
+        return "N/A"
     cleaned = re.sub(
         rf"^(?:{_TITLE_PATTERN})\s+", "", cleaned, flags=re.I
     )
@@ -280,11 +321,21 @@ def _looks_like_person(name: str) -> bool:
     toks = [t for t in name.split() if t]
     if not (2 <= len(toks) <= 4):
         return False
+    # Reject duplicated-token names (adjacent DOM text nodes gluing a name
+    # twice: "Jack Gilbert Jack Gilbert").
+    lowered = [t.lower() for t in toks]
+    if len(lowered) != len(set(lowered)):
+        return False
+    # Reject names that END in a title word (a split title forged a fake name).
+    if toks[-1].lower() in _TITLE_WORDS:
+        return False
     for t in toks:
         word = re.sub(r"[^\wÀ-ÖØ-öø-ÿ]", "", t)
         if not word:
             return False
         if word.lower() in _NAME_STOPWORDS:
+            return False
+        if word.lower() in _NAME_NOT_PERSON_WORDS:
             return False
         if not re.match(r"^[A-ZÀ-ÖØ-Ý]", t):
             return False
@@ -303,6 +354,11 @@ def extract_decision_maker(text: str) -> tuple[str, str]:
                 or match.group("name_spaced") or "")
         title = (match.group("title") or match.group("title_before")
                  or match.group("title_spaced") or "")
+        # Reject when a CTA verb ("Email", "Meet", "Call", …) immediately
+        # precedes the match — that is footer/CTA copy, not a person (F07).
+        prefix = cleaned[:match.start()].strip()
+        if _NAME_CTA_PREFIX_RE.search(prefix or ""):
+            continue
         name = _clean_person_name(name)
         title = normalize_text(title)
         if name != "N/A" and title != "N/A" and _looks_like_person(name):

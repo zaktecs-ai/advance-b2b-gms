@@ -36,6 +36,14 @@ _NEGATIVE = {
 _PLATFORMS = ["facebook", "instagram", "twitter", "linkedin", "youtube",
               "tiktok", "pinterest", "github", "snapchat"]
 
+# UI-chrome tokens that must never surface as review "topics". Previously
+# "months", "ago", "reviews" flowed into pitch hooks (F08).
+_UI_NOISE = {"ago", "month", "months", "week", "weeks", "year", "years",
+             "day", "days", "hour", "hours", "review", "reviews", "photo",
+             "photos", "like", "likes", "share", "shared", "edited",
+             "response", "owner", "local", "guide", "helpful", "read",
+             "more", "updated"}
+
 
 def sentiment_score(reviews: list[str]) -> float:
     """Return a -1..1 mean sentiment using a transparent lexicon."""
@@ -67,6 +75,8 @@ def review_keywords(reviews: list[str], top_n: int = 5) -> list[str]:
     counter: Counter = Counter()
     for r in reviews:
         for w in tokenize(r):
+            if w in _UI_NOISE:
+                continue
             if w not in _STOPWORDS and w not in _POSITIVE and w not in _NEGATIVE:
                 counter[w] += 1
     return [w for w, _ in counter.most_common(top_n)]

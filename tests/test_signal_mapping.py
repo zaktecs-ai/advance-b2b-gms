@@ -101,3 +101,16 @@ def test_review_panel_sentiment_roundtrip():
     assert a["sentiment_score"] > 0
     assert a["review_keywords"]
     assert a["top_review"]
+
+
+def test_fallback_detect_ignores_body_prose():
+    # F20: tech must be detected from markup/headers, never body prose.
+    from scraper.websites.tech_detect import _fallback_detect
+    html = "<html><body>We migrated from Django and love Cloudflare.</body></html>"
+    assert _fallback_detect(html, {}) == []
+
+
+def test_fallback_detect_finds_markup_artifact():
+    from scraper.websites.tech_detect import _fallback_detect
+    html = "<script src='https://cdn.shopify.com/a.js'></script>"
+    assert "Shopify" in _fallback_detect(html, {})

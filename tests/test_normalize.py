@@ -67,11 +67,13 @@ def test_normalize_phone():
 
 
 def test_normalize_phone_strips_extension_and_trailing_noise():
-    # C2: a valid number with an extension (or trailing noise) must keep its
-    # core number instead of becoming N/A.
-    assert normalize_phone("+1 555-123-4567 ext 890 call anytime") == "+15551234567"
-    assert normalize_phone("+1 (555) 123-4567 #22") == "+15551234567"
-    assert normalize_phone("+1 555-123-4567 ext. 890") == "+15551234567"
+    # C2 + F21: a valid number with an extension (or trailing noise) must keep
+    # its core number — and now PRESERVE the extension as `` x<ext>`` instead of
+    # destroying it (F21 changed the previous strip-and-discard behaviour).
+    assert normalize_phone("+1 555-123-4567 ext 890 call anytime") == "+15551234567 x890"
+    assert normalize_phone("+1 (555) 123-4567 #22") == "+15551234567 x22"
+    assert normalize_phone("+1 555-123-4567 ext. 890") == "+15551234567 x890"
+    assert normalize_phone("+1 555-123-4567") == "+15551234567"
 
 
 def test_normalize_email():

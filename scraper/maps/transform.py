@@ -20,9 +20,9 @@ from .parsing import (
 )
 
 _TEXT_COLUMNS = {
-    "business_name", "category", "subcategory", "address", "full_address",
+    "business_name", "category", "address", "full_address",
     "city", "state", "postal_code", "country", "plus_code", "business_status",
-    "business_hours", "claimed_status", "business_description", "about",
+    "business_hours", "claimed_status", "business_description",
     "source_query", "source_location", "source_keyword", "website_status",
     "website_failure_reason", "emails", "email_count", "tech_stack", "cms",
     "analytics", "tag_manager", "meta_pixel", "ga4", "gtm", "advertising",
@@ -30,9 +30,9 @@ _TEXT_COLUMNS = {
     "signal_licensed_insured", "signal_established", "signal_portfolio",
     "signal_mobile_service", "signal_membership", "sentiment_score",
     "review_keywords", "lead_score", "pitch_hook", "top_review",
-    "decision_maker_name", "decision_maker_title", "mx_enabled", "mx_status",
-    "mx_reason", "smtp_enabled", "smtp_status", "smtp_reason",
-    "filtered_out_reason", "record_id", "kgmid", "place_id", "cid",
+    "decision_maker_name", "decision_maker_title", "mx_status",
+    "mx_reason", "smtp_status", "smtp_reason",
+    "record_id", "place_id",
 }
 _URL_COLUMNS = {
     "website", "google_maps_url", "facebook", "instagram", "linkedin", "youtube",
@@ -149,6 +149,11 @@ def normalize_listing(raw: Mapping[str, Any] | None, *, query: str = "",
         column: _normalize_value(column, raw.get(column), phone_country)
         for column in OUTPUT_COLUMNS
     }
+    # kgmid/cid are internal identity signals (dedup top key) though no longer
+    # exported. Carry them through so ``resolve_identity`` sees them.
+    for _internal in ("kgmid", "cid"):
+        if not _is_missing(raw.get(_internal)):
+            record[_internal] = normalize_text(raw[_internal])
 
     if _is_missing(record.get("address")) and not _is_missing(record.get("full_address")):
         record["address"] = record["full_address"]

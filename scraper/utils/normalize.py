@@ -34,6 +34,13 @@ _TRACKING_PARAMS = {
     "sc_cid", "_vsrefdom", "y_source",
 }
 
+# Phone-extension keyword (F21): ext/extension/x/#/poste/anexo followed by 1-6
+# digits. Captured separately so the extension is preserved on the output.
+_EXT_RE = re.compile(
+    r"[\s,;]*(?:ext(?:ension)?\.?|x|#|poste|anexo)\s*[:.#\- ]*\s*(\d{1,6})\b.*$",
+    re.I,
+)
+
 # Redirect wrappers that resolve to a real destination via a url= param.
 _GOOGLE_WRAPPERS = {
     "google.com", "www.google.com", "google.co.uk", "google.ca",
@@ -273,14 +280,14 @@ def normalize_phone(raw: str | None, default_country: str = "US") -> str:
     # Google Maps commonly exposes ``phone:tel:+...`` as the attribute value;
     # other sources use a plain ``tel:`` URI.
     candidate = re.sub(r"^(?:phone:tel:|tel:)", "", candidate, flags=re.I).strip()
-    # Strip an extension (and any trailing noise that follows it) so a valid
-    # number with an extension survives instead of being nuked whole. The
-    # extension keyword may be ext/extension/x/#/poste/anexo and is optional;
-    # a bare "#22" is also recognized.
-    candidate = re.sub(
-        r"[\s,;]*(?:ext(?:ension)?\.?|x|#|poste|anexo)\s*[:.#\- ]*\s*\d+\b.*$",
-        "", candidate, flags=re.I,
-    ).strip()
+    # Capture the extension SEPARATELY (so it survives as `` x<ext>``) instead
+    # of being stripped and lost forever — extensions are valuable for B2B
+    # outreach (F21).
+    ext = None
+    m_ext = _EXT_RE.search(candidate)
+    if m_ext:
+        ext = m_ext.group(1)
+        candidate = candidate[:m_ext.start()].strip()
     # After extension removal, keep only the leading numeric phone token and
     # drop any remaining trailing alphabetic words, so a stray "call anytime"
     # cannot poison an otherwise valid number.
@@ -304,9 +311,10 @@ def normalize_phone(raw: str | None, default_country: str = "US") -> str:
             # have a carrier assignment in libphonenumber's data.
             if not phonenumbers.is_possible_number(parsed):
                 return "N/A"
-            return phonenumbers.format_number(
+            formatted = phonenumbers.format_number(
                 parsed, phonenumbers.PhoneNumberFormat.E164
             )
+            return f"{formatted} x{ext}" if ext else formatted
     except (NumberParseException, ValueError, TypeError):
         return "N/A"
 
@@ -315,7 +323,8 @@ def normalize_phone(raw: str | None, default_country: str = "US") -> str:
     digits = re.sub(r"\D", "", candidate)
     if not explicit_region or not 7 <= len(digits) <= 15:
         return "N/A"
-    return f"+{digits}" if digits else "N/A"
+    out = f"+{digits}" if digits else "N/A"
+    return f"{out} x{ext}" if ext and out != "N/A" else out
 
 
 # ---------------------------------------------------------------------------

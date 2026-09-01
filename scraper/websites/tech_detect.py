@@ -14,17 +14,18 @@ log = logging.getLogger(__name__)
 
 # Lightweight fallback signatures: tech name -> list of regex patterns.
 _FALLBACK_SIGNATURES: list = [
+    # Markup/header-anchored patterns only. Prose-only patterns (bare `gtag(`,
+    # bare `joomla`/`django`/`cloudflare` brand mentions) were removed — they
+    # fired on body copy and contradicted SignalDetector (F20).
     ("WordPress",       [r"wp-content", r"wp-includes", r"wp-json"]),
     ("Shopify",         [r"cdn\.shopify\.com", r"myshopify\.com"]),
     ("Wix",             [r"static\.wixstatic\.com", r"wix\.com/"]),
     ("Squarespace",     [r"squarespace\.com", r"static1\.squarespace\.com"]),
     ("Webflow",         [r"webflow\.com", r"webflow\.js"]),
     ("Elementor",       [r"elementor"]),
-    ("Joomla",          [r"joomla"]),
-    ("Drupal",          [r"drupal"]),
     ("Google Tag Manager", [r"googletagmanager\.com"]),
-    ("Google Analytics",  [r"google-analytics\.com", r"gtag\("]),
-    ("Cloudflare",      [r"cloudflare", r"cf-ray"]),
+    ("Google Analytics",  [r"google-analytics\.com"]),
+    ("Cloudflare",      [r"cf-ray"]),
     ("React",           [r"react(?:\.min)?\.js", r"__REACT_DEVTOOLS"]),
     ("Vue.js",          [r"vue(?:\.min)?\.js", r"__VUE__"]),
     ("Angular",         [r"angular(?:\.min)?\.js", r"ng-version"]),
@@ -35,7 +36,7 @@ _FALLBACK_SIGNATURES: list = [
     ("Font Awesome",    [r"font-awesome", r"fontawesome"]),
     ("Stripe",          [r"js\.stripe\.com"]),
     ("PayPal",          [r"paypal\.com", r"paypalobjects\.com"]),
-    ("HubSpot",         [r"hubspot", r"js\.hs-scripts\.com"]),
+    ("HubSpot",         [r"js\.hs-scripts\.com"]),
     ("Tawk.to",         [r"tawk\.to"]),
     ("Intercom",        [r"intercom"]),
     ("Calendly",        [r"calendly\.com"]),
@@ -43,22 +44,33 @@ _FALLBACK_SIGNATURES: list = [
     ("WooCommerce",     [r"woocommerce"]),
     ("BigCommerce",     [r"bigcommerce"]),
     ("Magento",         [r"magento"]),
-    ("Django",          [r"csrftoken", r"django"]),
-    ("Ruby on Rails",   [r"csrf-param", r"rails"]),
+    ("Django",          [r"csrftoken"]),
+    ("Ruby on Rails",   [r"csrf-param"]),
 ]
 
 
 def _fallback_detect(html: str, headers: dict[str, str] | None = None) -> list[str]:
-    text = html or ""
+    """Detect tech from markup artifacts + headers ONLY, never body prose.
+
+    Scanning raw HTML text made a blog sentence ("We migrated from Django and
+    love Cloudflare") flip tech detections (F20). Only script src / link href /
+    meta content and response headers are evidence.
+    """
+    from bs4 import BeautifulSoup
+
     hdr = " ".join(f"{k}: {v}" for k, v in (headers or {}).items())
-    hay = text + " " + hdr
-    found: list = []
-    for name, patterns in _FALLBACK_SIGNATURES:
-        for pat in patterns:
-            if re.search(pat, hay, re.I):
-                found.append(name)
-                break
-    return found
+    try:
+        soup = BeautifulSoup(html or "", "lxml")
+    except Exception:
+        soup = None
+    artifacts: list[str] = []
+    if soup is not None:
+        artifacts += [s.get("src", "") for s in soup.find_all("script")]
+        artifacts += [l.get("href", "") for l in soup.find_all("link")]
+        artifacts += [m.get("content", "") for m in soup.find_all("meta")]
+    hay = "\n".join(a for a in artifacts if a) + " " + hdr
+    return [name for name, patterns in _FALLBACK_SIGNATURES
+            if any(re.search(p, hay, re.I) for p in patterns)]
 
 
 def _wappalyzer_detect(url: str, html: str, headers: dict[str, str] | None = None) -> list[str]:
@@ -124,63 +136,3 @@ class TechDetector:
         if has("Meta Pixel"):
             classified["meta_pixel"] = "detected"
         return classified
-
-
-def detect_tech(html: str, scripts: list | None = None) -> dict:
-    """Backward-compatible single-call detect over raw HTML + optional scripts.
-
-    Returns detected keys from: cms, analytics, tag_manager, ga4, meta_pixel,
-    gtm, advertising, booking_system, chat_widget, ssl, tech_stack. Missing
-    detections are omitted so callers can apply their own missing-value policy.
-    """
-    detector = TechDetector(use_wappalyzer=False)
-    tech_stack, _ = detector.detect("", html or "")
-    blob = (html or "").lower() + "\n" + "\n".join(scripts or []).lower()
-
-    cms = next((k for k, p in {
-        "WordPress": r"wp-content|wp-includes|wordpress",
-        "Wix": r"wix\.com|wixstatic",
-        "Squarespace": r"squarespace",
-        "Shopify": r"cdn\.shopify\.com|shopify",
-        "Webflow": r"webflow",
-        "Joomla": r"joomla",
-        "Drupal": r"drupal",
-        "Magento": r"magento",
-    }.items() if re.search(p, blob)), None)
-
-    gtm = bool(re.search(r"googletagmanager\.com/gtm\.js|GTM-[A-Z0-9]+", blob))
-    ga4 = bool(re.search(r"gtag\(|G-[A-Z0-9]{6,}", blob))
-    meta_pixel = bool(re.search(r"connect\.facebook\.net|facebook\.com/tr|fbq\(", blob))
-    advertising = meta_pixel or bool(re.search(r"doubleclick|adsbygoogle|googlesyndication", blob))
-
-    booking = any(re.search(p, blob) for p in [
-        "calendly.com", "acuityscheduling.com", "booksy.com", "mindbodyonline.com",
-        "vagaro.com", "fresha.com", "setmore.com", "appointy.com",
-        "youcanbook.me", "simplybook.me", "schedulicity.com", "square.site"])
-    chat = any(re.search(p, blob) for p in [
-        "tawk.to", "intercom", "drift.com", "livechatinc.com", "zopim",
-        "crisp.chat", "hubspot.com", "freshchat", "zendesk"])
-
-    detected: dict[str, str] = {}
-    if cms:
-        detected["cms"] = cms
-    if "google-analytics" in blob or "gtag(" in blob:
-        detected["analytics"] = "Google Analytics"
-    if gtm:
-        detected["tag_manager"] = "detected"
-        detected["gtm"] = "detected"
-    if ga4:
-        detected["ga4"] = "detected"
-    if meta_pixel:
-        detected["meta_pixel"] = "detected"
-    if advertising:
-        detected["advertising"] = "yes"
-    if booking:
-        detected["booking_system"] = "yes"
-    if chat:
-        detected["chat_widget"] = "yes"
-    if "https://" in (html or "")[:200]:
-        detected["ssl"] = "yes"
-    if tech_stack:
-        detected["tech_stack"] = tech_stack
-    return detected

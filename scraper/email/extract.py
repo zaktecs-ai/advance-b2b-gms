@@ -27,15 +27,17 @@ _EMAIL_TOKEN_RE = re.compile(
 
 
 def _decode_obfuscated(text: str) -> str:
+    """Decode entity/bracket obfuscation; NEVER bare prose ``at``/``dot``.
+
+    Bare-word decoding turned ordinary sentences ("Order now at shop dot com")
+    into fake emails (F17). Only explicit obfuscation markers ([at], (at), &#64;,
+    etc.) decode.
+    """
     t = text
     t = t.replace("&#64;", "@").replace("&commat;", "@").replace("@&#8203;", "@")
     t = t.replace("&#46;", ".").replace("&#x2E;", ".").replace("&period;", ".")
-    t = re.sub(r"\s*\[at\]\s*", "@", t, flags=re.I)
-    t = re.sub(r"\s*\(at\)\s*", "@", t, flags=re.I)
-    t = re.sub(r"\s*\[dot\]\s*", ".", t, flags=re.I)
-    t = re.sub(r"\s*\(dot\)\s*", ".", t, flags=re.I)
-    t = re.sub(r"\s+at\s+", "@", t, flags=re.I)
-    t = re.sub(r"\s+dot\s+", ".", t, flags=re.I)
+    t = re.sub(r"\s*(?:\[|\()\s*at\s*(?:\]|\))\s*", "@", t, flags=re.I)
+    t = re.sub(r"\s*(?:\[|\()\s*dot\s*(?:\]|\))\s*", ".", t, flags=re.I)
     return t
 
 
@@ -54,7 +56,13 @@ def extract_emails_from_text(text: str) -> list[str]:
     return found
 
 
-def extract_emails(html: str | None, rendered_text: str = "", url: str = "") -> list[str]:
+_DEFAULT_EXCLUDE = [".testimonial", ".testimonials", ".review", ".reviews",
+                    ".review-body", ".comment", ".comments",
+                    ".wp-block-comment", "figcaption"]
+
+
+def extract_emails(html: str | None, rendered_text: str = "", url: str = "",
+                   exclude_selectors: list | None = None) -> list[str]:
     """Extract raw emails from an HTML page (and optional rendered DOM text)."""
     candidates: list[str] = []
     seen: set[str] = set()
@@ -74,14 +82,12 @@ def extract_emails(html: str | None, rendered_text: str = "", url: str = "") -> 
                 add([href[7:].split("?")[0]])
         for script in soup.find_all("script", type="application/ld+json"):
             add(extract_emails_from_text(script.get_text()))
-        # Remove testimonial/review/author sections and figure captions before
-        # reading visible text, so a customer's or reviewer's personal address
-        # is never harvested as the business's contact email.
-        for tag in soup.select(
-            ".testimonial,.review,.reviews,.review-body,.testimonials,"
-            "blockquote,figcaption,.comment,.comments,.wp-block-comment,"
-            ".quote,.author"
-        ):
+        # Remove testimonial/review/figure-caption sections before reading
+        # visible text so a reviewer's personal address is never harvested as
+        # the business contact. `.author`/`blockquote`/`.quote`/`cite` are
+        # intentionally NOT stripped (real team bios too often) — see F33.
+        selectors = exclude_selectors if exclude_selectors is not None else _DEFAULT_EXCLUDE
+        for tag in soup.select(",".join(selectors)):
             tag.decompose()
         add(extract_emails_from_text(soup.get_text(" ")))
 

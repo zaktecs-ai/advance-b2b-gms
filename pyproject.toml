@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "advance-b2b-gms"
 version = "1.0.0"
 description = "A clean-room, most-capable Google Maps B2B lead scraper"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "playwright>=1.40,<2",
     "httpx>=0.25,<1",

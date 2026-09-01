@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import socket
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -34,7 +34,7 @@ class FetchResult:
     html: str
     reason: str | None
     final_url: str
-    headers: dict = None  # populated when response received
+    headers: dict = field(default_factory=dict)  # populated when response received
 
 
 def _classify(exc: Exception) -> str:
@@ -52,8 +52,9 @@ def _classify(exc: Exception) -> str:
             if isinstance(cause, ssl.SSLError):
                 return FailureReason.TLS_ERROR
             cause = cause.__cause__ or cause.__context__
-        if isinstance(exc, httpx.ConnectTimeout):
-            return FailureReason.TIMEOUT
+        # Note: `httpx.ConnectTimeout` is already caught above by the first
+        # branch, so the duplicate check that used to live here was unreachable
+        # (F12). Keep the cause-chain walk as the authority.
         msg = str(exc)
         if _DNS_TEXT_PATTERNS_ANY(msg):
             return FailureReason.DNS_FAILURE

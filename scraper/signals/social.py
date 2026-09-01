@@ -32,17 +32,21 @@ _REDIRECT_HOSTS = {
 # Path substrings that always mark an action/redirect/embed/pixel URL, not a
 # profile. Present on any of a platform's official domains, regardless of which
 # platform the final host match belongs to.
-_REJECT_PATH_SUBSTR = (
-    "/sharer", "/share", "/sharing/", "/intent/", "/plugins/", "/dialog/",
-    "/l.php", "/tr", "/watch", "/embed", "/pin/create", "/pages/",
-    "/login", "/signup", "/accounts/", "/redirect", "/u/0/",
-)
+# NOTE: rejection is by FIRST PATH SEGMENT, not raw substring (F18), so
+# ``/travel`` is no longer killed by the shared ``/tr`` prefix and real
+# ``/pages/<name>`` Facebook pages are accepted.
+_REJECT_SEGMENTS = {
+    "sharer", "share", "sharing", "intent", "plugins", "dialog", "l.php",
+    "tr", "watch", "embed", "login", "signup", "accounts", "redirect",
+}
 
 # Per-platform profile-path shapes. A real handle is a short segment of
 # username-legal characters; a bare root or a well-known non-handle path is not.
 _PROFILE_PATH = {
-    "facebook": re.compile(r"^/(?!sharer|plugins|tr|pages|groups|watch|events|marketplace|photo|videos|story|reel)[A-Za-z0-9.\-]{1,}/?$"),
-    "instagram": re.compile(r"^/(?!p/|reel|stories|explore|accounts|tv/)[A-Za-z0-9._]{1,}/?$"),
+    "facebook": re.compile(r"^/(?!sharer|plugins|tr|groups|watch|events|marketplace|photo|videos|story|reel)(?:pages/)?[A-Za-z0-9.\-]{1,}/?$"),
+    # The FIRST segment is the handle; a trailing sub-path (e.g. /natgeo/travel/)
+    # is still the handle's profile (F18).
+    "instagram": re.compile(r"^/(?!p/|reel|stories|explore|accounts|tv/)[A-Za-z0-9._]{1,}(?:/.*)?$"),
     "linkedin": re.compile(r"^/(?:company|school|in)/[A-Za-z0-9%_.\-]+/?$"),
     "youtube": re.compile(r"^/(?:@|c/|channel/|user/)[A-Za-z0-9_.\-]+/?$"),
     "twitter_x": re.compile(r"^/(?!intent|share|home|search|explore|messages|settings|i/)[A-Za-z0-9_]{1,15}/?$"),
@@ -73,7 +77,8 @@ def platform_for_url(url: str) -> str | None:
         return None
     path = parts.path or "/"
     low_path = path.lower()
-    if any(s in low_path for s in _REJECT_PATH_SUBSTR):
+    segments = [s for s in low_path.split("/") if s]
+    if segments and segments[0] in _REJECT_SEGMENTS:
         return None
     for platform, pattern in _PLATFORM_HOSTS.items():
         if re.search(pattern, host):

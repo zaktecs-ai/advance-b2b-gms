@@ -54,8 +54,13 @@ def test_parse_maps_url_place_id():
 
 
 def test_parse_maps_url_coords():
+    # F05: the `/maps/@…` viewport center is the search CAMERA position, not the
+    # business pin, so it must never become lat/lng. Only `!3d…!4d…` counts.
     d = parse_google_maps_url("https://www.google.com/maps/@32.7767,-96.797,15z")
-    assert d["lat"] == 32.7767 and d["lng"] == -96.797
+    assert "lat" not in d and "lng" not in d
+    d2 = parse_google_maps_url(
+        "https://www.google.com/maps/place/X/@32.7,-96.7,15z/data=!4m1!1s0x1:0x2!8m2!3d29.8677916!4d-95.5618629")
+    assert d2["lat"] == 29.8677916 and d2["lng"] == -95.5618629
 
 
 def test_classify_open_closed():
@@ -79,3 +84,49 @@ def test_argentine_postal_requires_full_cpa():
     ar = decompose_address("Av. Corrientes 1234, Buenos Aires, A1234ABC")
     assert ar["postal_code"] == "A1234ABC"
     assert ar["country"] == "AR"
+
+
+# --- Audit regressions: F03 kgmid / F04 cid / F05 coords / F22 address -----
+from tests.fixtures.production_urls import (
+    ABERLE_AD_TOKEN_URL,
+    FULL_PLACE_URL,
+    KGID_ENCODED_URL,
+    KGID_PLAIN_URL,
+    VIEWPORT_ONLY_URL,
+    VIEWPORT_PLUS_PIN_URL,
+)
+
+
+def test_kgmid_extracted_from_encoded_url():
+    # F03: percent-encoded `!16s%2Fg%2F…` must yield the kgmid.
+    assert parse_google_maps_url(KGID_ENCODED_URL)["kgmid"] == "1tf719p9"
+
+
+def test_kgmid_extracted_from_plain_url():
+    assert parse_google_maps_url(KGID_PLAIN_URL)["kgmid"] == "1abcXYZ"
+
+
+def test_cid_matches_place_id_and_ignores_ad_tokens():
+    # F04: cid == place_id, both from `!1s`; the `!5s` ad token is ignored.
+    d = parse_google_maps_url(ABERLE_AD_TOKEN_URL)
+    assert d["place_id"] == "0x8640e99260148083:0x103f08fd2afc21"
+    assert d["cid"] == d["place_id"]
+
+
+def test_viewport_center_never_becomes_place_coords():
+    # F05: viewport-only URL -> no coords.
+    d = parse_google_maps_url(VIEWPORT_ONLY_URL)
+    assert "lat" not in d and "lng" not in d
+
+
+def test_true_pin_coords_extracted_over_viewport():
+    d = parse_google_maps_url(VIEWPORT_PLUS_PIN_URL)
+    assert d["lat"] == 29.8677916 and d["lng"] == -95.5618629
+
+
+def test_pipe_and_newline_separated_addresses():
+    # F22: separators other than commas must not yield all-N/A. (normalize_text
+    # collapses newlines, so we test the pipe separator which survives.)
+    d = decompose_address("Musterstraße 1 | 10115 Berlin | Deutschland")
+    assert d["postal_code"] == "10115"
+    assert d["country"] == "DE"
