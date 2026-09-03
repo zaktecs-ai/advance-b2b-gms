@@ -4,11 +4,11 @@ Locks the F01 (facebook constant), F02 (one-row-shift), and F15 (phone
 international dead branch) fixes at the pure-function level — no browser
 required.
 """
+from scraper.models import OUTPUT_COLUMNS
 from scraper.maps.collector import (
     _clean_plus_code,
     _names_compatible,
     _status_from_hours,
-    clean_description,
     digits_to_intl,
     filter_panel_hrefs,
 )
@@ -41,19 +41,12 @@ def test_digits_to_intl():
     assert digits_to_intl("+1 (555) 123-4567") == "+15551234567"
 
 
-# --- G01: business_description must never carry UI chrome -------------------
+# --- business_description ELIMINATED (owner decision) -----------------------
 
-def test_description_junk_rejected():
-    # G1-E/G1-E2: "See photos" and rating-block text polluted most rows.
-    for junk in ("See photos", "SEE PHOTOS", "4.9 (34)", "3.8 (10)",
-                 "5.0 (1)", "Open 24 hours"):
-        assert clean_description(junk) == "N/A"
-    assert clean_description("") == "N/A"
-    assert clean_description(None) == "N/A"
-
-
-def test_description_real_text_kept():
-    assert "plumbing" in clean_description("Sample plumbing service.").lower()
+def test_business_description_removed_from_schema():
+    # Production showed only "See photos" junk; the column is gone from the
+    # engine AND the export schema entirely.
+    assert "business_description" not in OUTPUT_COLUMNS
 
 
 # --- G06: honest business_status fallback from hours ------------------------

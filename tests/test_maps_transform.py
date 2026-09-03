@@ -26,13 +26,13 @@ _PROTECTED_COLUMNS = {
     "postal_code", "country", "latitude", "longitude", "rating",
     "review_count", "google_maps_url", "place_id", "source_query",
     "source_keyword", "source_location", "business_hours", "business_status",
-    "claimed_status", "business_description", "category",
+    "claimed_status", "category",
 }
 
 
 def test_schema_has_no_unproduced_ghost_columns():
     assert not _GHOST_COLUMNS.intersection(OUTPUT_COLUMNS)
-    assert len(OUTPUT_COLUMNS) == 68
+    assert len(OUTPUT_COLUMNS) == 72
 
 
 def test_protected_columns_still_present():

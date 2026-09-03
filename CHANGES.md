@@ -604,3 +604,68 @@ existing consumers unaffected (backward compatible).
 
 Suite grew 224 → 242 passing (18 new: signals/summary/wiring). Full suite,
 compileall, and the F25 dead-section guard all green.
+
+---
+
+# Photos/owner-activity columns (5 new) + business_description ELIMINATED (68 → 72 base)
+
+Operator-requested changes: (1) `business_description` completely eliminated
+from the engine (production showed only "See photos" junk on every row), and
+(2) five new Maps detail-panel columns added right after `business_hours`.
+
+## Removed — `business_description`
+
+- Dropped from `models.OUTPUT_COLUMNS` (68 → 72 base columns), from the
+  collector (`DESCRIPTION_SELECTORS`, `clean_description`, junk regex — all
+  removed), from `_TEXT_COLUMNS` (transform), and from `DemoCollector`.
+- Tests for the removed feature were replaced by an elimination lock
+  (`test_business_description_removed_from_schema`) per the owner decision.
+
+## Added — 5 columns (after `business_hours`)
+
+| Column | Source (detail panel) | Value |
+|---|---|---|
+| `cover_image_url` | hero header `button.aoRNLd img[src]` (+ hero-jsaction / `div.ZKCDEc` / carousel-All fallbacks) | Google CDN image URL |
+| `latest_image_upload` | photos carousel card `button[aria-label^="Latest"]` → aria-label "Latest · 11 days ago" | relative time ("11 days ago") |
+| `by_owner_photos` | carousel card `button[aria-label="By owner"]` presence | YES / NO |
+| `has_recent_post` | `h2` "From the owner" section presence (deep panel) | YES / NO |
+| `latest_post_date` | owner-post timestamp (`.S3NLN .lqMB`) | relative time ("3 days ago") |
+
+Extraction lives in `scraper/maps/collector.py`:
+`_settle_panel()` (cursor moved INTO `div[role=main]`, bounded wheel scroll —
+lazy sections hydrate on scroll), `_scroll_photos_into_view()`,
+`_deep_scroll_panel()` (scrolls all tall containers to bottom for the
+virtualized owner-post section), and `_read_photo_columns()` (pure-read
+helper, retried once after a deep-scroll round when everything misses —
+Google hydrates the photos section inconsistently across runs; live-verified).
+Pure helper `parse_latest_upload_label()` splits the carousel aria-label.
+
+## Schema migration (backward compatible)
+
+`Pipeline._migrate_csv_schema()`: an existing leads.csv written by an older
+schema is detected (header mismatch) and rebuilt from the checkpoint's
+committed `raw_json` records — new columns padded `N/A`, removed columns
+(`business_description`) dropped. Zero data loss; no manual action needed.
+
+## Live verification (real Google Maps run, headless Chromium)
+
+Query "SEO Expert in Pakistan - Digital Marketing Services", 2 results:
+- `cover_image_url` — real googleusercontent URLs on both rows ✓
+- `latest_image_upload` — "11 days ago" on the listing whose carousel has a
+  Latest card (matches the operator's inspected listing exactly); honest N/A
+  on the listing without one ✓
+- `by_owner_photos` — YES where the owner-photos category exists ✓
+- `summary.json` — 2 leads, metrics + campaign details present ✓
+- `business_description` — absent from header ✓
+
+## Known limitation
+
+`has_recent_post`/`latest_post_date` depend on the "From the owner" section
+being rendered; Google serves that section inconsistently to anonymous
+headless sessions (it virtualizes deep below the fold and never entered the
+DOM in our live runs, even though it appears in the operator's logged-in
+session). The column honestly reports NO/N/A rather than fabricating data.
+Tests (`tests/test_photo_columns.py`, 4): pure parsing, schema position/count,
+e2e CSV export order + values, old-CSV migration rebuild.
+
+Suite: 242 → 245 passing.

@@ -14,7 +14,9 @@ sentiment/lead_score/pitch_hook (with an optional LLM personalized hook).
 """
 from __future__ import annotations
 
+import csv
 import logging
+import os
 import re
 import time
 import uuid
@@ -142,6 +144,11 @@ class Pipeline:
         out_dir.mkdir(parents=True, exist_ok=True)
         self.out_dir = out_dir
         self.checkpoint = CheckpointStore(out_dir / "checkpoint.sqlite")
+        # Schema migration: an existing leads.csv written by an older schema
+        # is rebuilt from the checkpoint's committed raw records (missing new
+        # columns become N/A, removed columns are dropped) BEFORE the writer
+        # opens the file, so the append writer always sees a matching header.
+        self._migrate_csv_schema(out_dir / csv_name, list(self.output_columns))
         self.csv = AtomicCSVWriter(out_dir / csv_name, list(self.output_columns))
         self._reconcile_csv_with_checkpoint()
         # G13: serial-pass guard against cross-business social contamination.
@@ -231,6 +238,36 @@ class Pipeline:
         return (self._idle_exit_seconds > 0
                 and (time.monotonic() - self._last_commit_mono)
                 > self._idle_exit_seconds)
+
+    def _migrate_csv_schema(self, csv_path: Path, expected: list[str]) -> None:
+        """Rebuild an old-schema leads.csv to the current column contract.
+
+        The checkpoint's committed raw records are the source of truth; rows
+        are re-projected onto the new schema (missing keys -> N/A, removed
+        keys dropped). No-op when the file is absent or already current.
+"""
+        try:
+            with open(csv_path, encoding="utf-8", newline="") as fh:
+                rows = list(csv.reader(fh))
+        except FileNotFoundError:
+            return
+        except Exception as e:  # noqa: BLE001 - unreadable file: leave it
+            log.warning("schema migration skipped (unreadable CSV): %s", e)
+            return
+        if not rows or rows[0] == expected:
+            return
+        committed = list(self.checkpoint.iter_committed_rows())
+        log.warning(
+            "schema change detected (%d -> %d columns) - rebuilding %s from "
+            "checkpoint (%d committed rows)",
+            len(rows[0]), len(expected), csv_path.name, len(committed))
+        with open(csv_path, "w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(expected)
+            for raw in committed:
+                writer.writerow([str(raw.get(c, "N/A")) for c in expected])
+            fh.flush()
+            os.fsync(fh.fileno())
 
     def _reconcile_csv_with_checkpoint(self) -> None:
         """Trim CSV rows that were durably written but never committed.

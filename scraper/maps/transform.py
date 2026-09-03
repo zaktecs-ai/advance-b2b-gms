@@ -22,7 +22,10 @@ from .parsing import (
 _TEXT_COLUMNS = {
     "business_name", "category", "address", "full_address",
     "city", "state", "postal_code", "country", "plus_code", "business_status",
-    "business_hours", "claimed_status", "business_description",
+    "business_hours", "claimed_status",
+    # Photos / owner-activity columns (yes/no flags + relative times)
+    "latest_image_upload", "by_owner_photos", "has_recent_post",
+    "latest_post_date",
     "source_query", "source_location", "source_keyword", "website_status",
     "website_failure_reason", "emails", "email_count", "tech_stack", "cms",
     "analytics", "tag_manager", "meta_pixel", "ga4", "gtm", "advertising",
@@ -35,7 +38,7 @@ _TEXT_COLUMNS = {
     "record_id", "place_id",
 }
 _URL_COLUMNS = {
-    "website", "google_maps_url", "facebook", "instagram", "linkedin", "youtube",
+    "website", "google_maps_url", "cover_image_url", "facebook", "instagram", "linkedin", "youtube",
     "twitter_x", "tiktok", "pinterest", "github", "snapchat",
 }
 _PHONE_COLUMNS = {"phone", "phone_international"}

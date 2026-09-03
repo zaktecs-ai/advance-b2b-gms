@@ -150,31 +150,110 @@ HOURS_TABLE_SELECTORS = ['table.eK4R0e', 'table[class*="hours"]']
 HOURS_ROW_SELECTOR = 'button[aria-label*="Copy open hours"]'
 STATUS_SELECTORS = ['span.ZDu9vd', 'div.o0Svhf span',
                     '[aria-label="Open"], [aria-label="Closed"]']
-# G01: only AUTHORITATIVE description sources. The generic
-# `div[class*="fontBodyMedium"]` / bare `div.PYvSYb` selectors matched UI
-# chrome ("See photos" gallery button, the "4.9 (34)" rating block) on ~100%
-# of panels, polluting `business_description` on nearly every exported row.
-DESCRIPTION_SELECTORS = ['div[data-item-id="editorial_summary"]',
-                         'div.PZvSYb[data-item-id="editorial-summary"]']
-# Text-quality fallback (G01 part 2): the bare editorial-styled block is only
-# trusted when it is long enough to be real editorial text.
-_DESCRIPTION_FALLBACK_SELECTOR = 'div.PYvSYb'
-_DESC_FALLBACK_MIN_CHARS = 60
+# --- Photos / owner-activity columns (owner decision: business_description
+# ELIMINATED from the engine - production showed only "See photos" junk) ----
 
-# UI chrome / rating-block shapes that must never be exported as a
-# description (defense in depth — see G01 evidence G1-E/G1-E2).
-_DESC_JUNK_RE = re.compile(
-    r"^(?:see\s+(?:all\s+)?photos?|photos?|\d+\s*photos?)$"
-    r"|^\d[.,]\d\s*\(\d[\d,]*\)\s*$"
-    r"|^(?:open|closed)\b", re.I)
+COVER_IMAGE_SELECTORS = ['button.aoRNLd img',
+                         'button[jsaction*="heroHeaderImage"] img',
+                         'div.ZKCDEc img',
+                         'button.K4UgGe[data-carousel-index="0"] img']
+LATEST_PHOTO_LABEL_SELECTOR = 'button[aria-label^="Latest"]'
+BY_OWNER_PHOTO_SELECTOR = 'button[aria-label="By owner"]'
+FROM_OWNER_HEADING_SELECTOR = 'h2:has-text("From the owner")'
+FROM_OWNER_DATE_SELECTORS = ['div.S3NLN .lqMB', '.SBD2Rc .lqMB']
 
 
-def clean_description(text: str | None) -> str:
-    """Return a cleaned description, or 'N/A' when the text is UI junk."""
-    t = re.sub(r"\s+", " ", (text or "")).strip()
-    if not t or _DESC_JUNK_RE.match(t):
+def parse_latest_upload_label(label):
+    """Parse 'Latest · 11 days ago' (carousel aria-label) -> '11 days ago'.
+
+    Returns 'N/A' when the label or the separator segment is missing.
+    """
+    if not label:
         return "N/A"
-    return t
+    parts = label.split("·")
+    if len(parts) < 2:
+        return "N/A"
+    value = parts[1].strip()
+    return value or "N/A"
+
+
+def _yes_no(flag):
+    return "YES" if flag else "NO"
+
+
+def _settle_panel(page, rounds: int = 4, pause_ms: int = 400) -> None:
+    """Scroll the detail panel so lazy sections (hero photo, photos carousel,
+    owner posts) hydrate before extraction. Best-effort, never raises.
+
+    The wheel only scrolls the element under the cursor, so the cursor is
+    moved INTO the detail panel (div[role=main]) first - over the feed it
+    would scroll the results list instead and the panel stays unhydrated
+    (live-verified)."""
+    try:
+        panel = page.locator('div[role="main"]').first
+        if panel.count() > 0:
+            box = panel.bounding_box()
+            if box:
+                page.mouse.move(box["x"] + box["width"] / 2.0,
+                                box["y"] + min(box["height"] / 2.0, 400.0))
+        for _ in range(rounds):
+            page.mouse.wheel(0, 900)
+            time.sleep(pause_ms / 1000.0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _scroll_photos_into_view(page) -> None:
+    """Bring the photos carousel and hero header into view so their media
+    hydrates. Called once per extraction, plus on retry when the cover image
+    read still misses. Best-effort, never raises."""
+    for sel in ('.fp2VUc', 'div.ZKCDEc', 'button.aoRNLd'):
+        try:
+            page.locator(sel).first.scroll_into_view_if_needed(timeout=1500)
+        except Exception:  # noqa: BLE001 - selector may not exist per listing
+            continue
+    time.sleep(0.6)
+
+
+def _deep_scroll_panel(page, steps: int = 6, pause_ms: int = 300) -> None:
+    """Scroll every tall scrollable container to its bottom, in steps.
+
+    Maps virtualizes deep panel sections ("From the owner" posts sit far
+    below the photos carousel) - they only enter the DOM when scrolled into
+    view. Best-effort, never raises.
+    """
+    try:
+        for _ in range(steps):
+            page.evaluate(
+                "() => { for (const e of document.querySelectorAll('div')) {"
+                " if (e.scrollHeight > e.clientHeight + 100 &&"
+                " e.clientHeight > 300) { e.scrollTop = e.scrollHeight; } } }")
+            time.sleep(pause_ms / 1000.0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _read_photo_columns(page) -> dict:
+    """Read the photos-carousel + hero columns from the currently open panel."""
+    out: dict = {}
+    cover = "N/A"
+    for sel in COVER_IMAGE_SELECTORS:
+        cover = _first_attr(page, sel, "src") or "N/A"
+        if cover != "N/A":
+            break
+    out["cover_image_url"] = cover
+    try:
+        latest_label = page.locator(LATEST_PHOTO_LABEL_SELECTOR).first \
+            .get_attribute("aria-label", timeout=1500)
+    except Exception:  # noqa: BLE001
+        latest_label = None
+    out["latest_image_upload"] = parse_latest_upload_label(latest_label)
+    try:
+        out["by_owner_photos"] = _yes_no(
+            page.locator(BY_OWNER_PHOTO_SELECTOR).count() > 0)
+    except Exception:  # noqa: BLE001
+        out["by_owner_photos"] = "NO"
+    return out
 
 
 def _status_from_hours(hours: str | None) -> str | None:
@@ -195,6 +274,8 @@ def _clean_plus_code(text: str | None) -> str:
     """G12: collapse internal whitespace and strip edges of a plus code."""
     t = re.sub(r"\s+", " ", (text or "")).strip()
     return t or "N/A"
+
+
 ABOUT_SELECTORS = ['div[data-item-id="about"]', 'button[jsaction*="about"]']
 
 
@@ -554,20 +635,39 @@ class MapsCollector:
             data["business_status"] = _status_from_hours(
                 data["business_hours"]) or "N/A"
         data["claimed_status"] = self._claimed_status(page)
-        raw_desc = _first_text(page, DESCRIPTION_SELECTORS)
-        if not raw_desc:
-            # G01 text-quality fallback: trust the generic editorial block
-            # only when it is long enough to be real editorial text.
-            fallback = _first_text(page, [_DESCRIPTION_FALLBACK_SELECTOR])
-            if fallback and len(fallback) >= _DESC_FALLBACK_MIN_CHARS:
-                raw_desc = fallback
-        data["business_description"] = clean_description(raw_desc)
+        # Lazy sections hydrate on scroll - settle the panel first,
+        # else hero image / carousel / owner-post selectors miss.
+        _settle_panel(page)
+        _scroll_photos_into_view(page)
+        # -- Photos / owner-activity columns --------------------------------
+        photos = _read_photo_columns(page)
+        if (photos["cover_image_url"] == "N/A"
+                and photos["by_owner_photos"] == "NO"):
+            # Google hydrates the photos section inconsistently across runs
+            # (live-verified) - one deep-scroll + re-read round for stability.
+            _deep_scroll_panel(page, steps=4)
+            _scroll_photos_into_view(page)
+            photos = _read_photo_columns(page)
+        data.update(photos)
         data["about"] = _first_text(page, ABOUT_SELECTORS) or "N/A"
 
         data.update(_extract_social_links(page))
 
         data["google_maps_url"] = clean_maps_url(page.url)
         apply_url_identity(data, page.url)
+
+        # -- Owner post (G: has_recent_post) --------------------------------
+        # The "From the owner" section virtualizes until scrolled deep; do it
+        # AFTER the top-of-panel reads so nothing above gets unmounted first.
+        _deep_scroll_panel(page)
+        try:
+            has_post = page.locator(FROM_OWNER_HEADING_SELECTOR).count() > 0
+        except Exception:
+            has_post = False
+        data["has_recent_post"] = _yes_no(has_post)
+        data["latest_post_date"] = (
+            _first_text(page, FROM_OWNER_DATE_SELECTORS) or "N/A"
+            if has_post else "N/A")
 
         # Coherence sentinel: the panel's business name must share a token with
         # the URL's place slug. On a mismatch the panel still shows the previous
@@ -787,7 +887,11 @@ class DemoCollector:
                 "claimed_status": "Claimed",
                 "business_status": "Open",
                 "business_hours": "Mon: 9 AM to 5 PM; Tue: 9 AM to 5 PM",
-                "business_description": "Sample plumbing service.",
+                "cover_image_url": "https://lh3.googleusercontent.com/demo/cover.jpg",
+                "latest_image_upload": "11 days ago",
+                "by_owner_photos": "YES",
+                "has_recent_post": "YES",
+                "latest_post_date": "3 days ago",
                 "google_maps_url": f"https://www.google.com/maps/place/Sample/{i}",
                 "place_id": f"0x1{i}2:0x3{i}4",
                 "cid": f"0x1{i}2:0x3{i}4",

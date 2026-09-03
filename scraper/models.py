@@ -27,7 +27,10 @@ OUTPUT_COLUMNS: list[str] = [
     "plus_code", "google_maps_url",
     # --- Maps intelligence ---
     "rating", "review_count", "claimed_status", "business_status",
-    "business_hours", "business_description",
+    "business_hours",
+    # --- Photos / owner-activity intelligence (72-col contract) -------
+    "cover_image_url", "latest_image_upload", "by_owner_photos",
+    "has_recent_post", "latest_post_date",
     # --- Provenance ---
     "source_query", "source_location", "source_keyword",
     # --- Website intelligence ---
