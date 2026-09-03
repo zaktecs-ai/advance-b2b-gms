@@ -84,8 +84,11 @@ ai_hook:
   retries: 2
 
 concurrency:
-  website_workers: 8           # parallel website enrichment (I/O-bound)
-  playwright_workers: 2        # reserved for a future concurrent collector
+  website_workers: 16          # parallel website enrichment (I/O-bound); cap = 16
+  playwright_workers: 4        # validated + capped at 4, but currently RESERVED:
+                               # the Maps collector runs ONE sequential browser
+                               # (anti-bot pacing). No runtime effect yet — see
+                               # CHANGES.md "Config tuning verification".
 
 delays:
   maps_min_seconds: 2.0

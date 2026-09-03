@@ -448,3 +448,75 @@ Suite grew 191 → 215 passing tests. V1 suite (F01–F33) fully green throughou
   `server.sh` help/demo flow now exits cleanly under a cp1252 pipe.
 - **Evidence:** `tests/test_server_controller.py` green where a usable POSIX
   bash exists (skipped with a clear reason on WSL-stub-only Windows hosts).
+
+---
+
+# Config tuning verification (Control file / config.yaml, workers + filters)
+
+Operator-requested tuning: `concurrency.website_workers` 8 → 16,
+`concurrency.playwright_workers` 2 → 4, plus confirmation that every knob in
+`config.yaml` / `config.local.yaml` (the server.sh control-panel file) really
+drives behavior. Verification-only generation: no engine code changed.
+
+## Wiring audit (every knob traced to its runtime reader)
+
+- `concurrency.website_workers` — READ at `scraper/pipeline.py`
+  (`workers = max(1, self.cfg.concurrency.website_workers)`); sizes the
+  enrichment `ThreadPoolExecutor` and the drain batch (`workers * 4`).
+  Valid range 1–16 (pydantic), so 16 is the supported maximum.
+- `concurrency.playwright_workers` — validated and capped (1–4) but NOT read
+  by any runtime module: the Maps collector runs one sequential browser by
+  design (anti-bot pacing). Changing it has NO runtime effect today; the
+  config.yaml comment now says so honestly, and
+  `tests/test_concurrency.py::test_playwright_workers_is_reserved_no_runtime_reader`
+  guards that documentation (it fails if a future change wires it up).
+- `filters:` (`include_all` / `include_any` / `exclude_all` / `exclude_any`) —
+  READ at `scraper/pipeline.py` via `split_filters()` (Maps-field conditions run
+  pre-enrichment, enrichment-field conditions run post-enrichment) and
+  `evaluate()` in both pipeline passes. Operators: `= != > < >= <= in notin
+  contains`, plus `negate`.
+- All other sections were already covered by the F25 dead-section guard
+  (`test_config_template_has_no_dead_sections`).
+
+## Tests added (`tests/test_concurrency.py`)
+
+- `test_template_concurrency_values_load` — the shipped config.yaml loads with
+  website_workers=16 / playwright_workers=4.
+- `test_website_workers_above_cap_fails_fast` /
+  `test_website_workers_below_one_fails_fast` — 17 or 0 abort at startup with
+  a clear ConfigError (fail-fast, no mid-run misbehavior).
+- `test_website_workers_sizes_enrichment_thread_pool` — end-to-end demo run
+  with a spied `ThreadPoolExecutor`: the pool is created with EXACTLY the
+  configured count (16).
+- `test_website_workers_one_runs_serially` — workers=1 takes the serial path
+  (no pool built).
+- `test_exclude_any_filter_drops_matching_records` /
+  `test_include_all_filter_keeps_only_matching_records` — end-to-end proof
+  that filter entries in config.yaml keep/drop exported rows (3 demo rows →
+  2 committed, 1 filtered; CSV contents verified).
+- `test_playwright_workers_cap_is_four`,
+  `test_playwright_workers_is_reserved_no_runtime_reader`.
+
+## Deployment procedure (server)
+
+1. Back up the control file: `cp config.local.yaml config.local.yaml.bak-$(date +%F)`.
+2. Apply repo update: `./server.sh update` (pulls this commit; NOTE — it does
+   NOT overwrite your `config.local.yaml`).
+3. Either re-copy the tuned values into the control file
+   (`cp config.yaml config.local.yaml` — preserves nothing local, review first)
+   or edit just the `concurrency:` block via `./server.sh config`.
+4. Smoke: `./server.sh demo` (offline, no Google contact) then
+   `./server.sh status` / `./server.sh logs`.
+
+## Rollback
+
+- Repo template: `git revert <commit>` or
+  `cp config.yaml.bak-2026-09-03 config.yaml` (backup kept outside VCS), commit, push.
+- Server: `cp config.local.yaml.bak-$(date +%F) config.local.yaml && ./server.sh stop && ./server.sh run`.
+
+## Risk assessment
+
+- website_workers=16 raises parallel HTTP load on target websites and on the
+  VPS (sockets/RAM). It is I/O-bound work, validated ≤16, and each fetch has
+  its own timeouts — accepted risk; drop to 8 if the VPS shows pressure.
+- playwright_workers change is inert (reserved) — zero runtime risk.
