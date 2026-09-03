@@ -520,3 +520,87 @@ drives behavior. Verification-only generation: no engine code changed.
   VPS (sockets/RAM). It is I/O-bound work, validated ≤16, and each fetch has
   its own timeouts — accepted risk; drop to 8 if the VPS shows pressure.
 - playwright_workers change is inert (reserved) — zero runtime risk.
+
+---
+
+# Config-driven custom signals + summary.json + full wiring audit
+
+Generation implementing: (1) user-defined website signals from config.yaml
+(column name + keywords + any/all combination), (2) per-campaign
+`summary.json` with CPU/RAM/time/server/lead details, (3) an audit + wiring of
+every remaining decorative config key. No hard-coded defaults: every key in
+config.yaml now has a runtime reader, enforced by a test.
+
+## 1. Custom signals (`signals.custom` in config.yaml)
+
+- `scraper/config.py`: new `SignalsConfig` — per-signal spec `column` (the
+  export column name), `match: any|all` (OR/AND combination of multiple
+  keyword filters), `keywords`/`regex`, `enabled`. Validates column shape
+  (`[a-z0-9_]`, ≤64 chars), duplicate columns, empty keyword sets, unknown
+  match modes — all fail fast as ConfigError.
+- `scraper/signals/detector.py`: `SignalDetector.run` honors `column` (output
+  key) and `match: all` (new `_kw_signal_all`, AND semantics; `any` = legacy
+  OR). Built-ins unchanged.
+- `scraper/filters/engine.py`: `split_filters(extra_post_fields=...)` —
+  custom signal columns are treated as enrichment fields so `filters:`
+  conditions on them run in the post-enrichment pass.
+- `scraper/pipeline.py`: schema becomes dynamic — 68 base columns + one column
+  per enabled custom signal (CSV, XLSX and summary all use it). Collision with
+  built-in columns is rejected at startup. Removal from config.yaml removes
+  the column.
+- Tests (`tests/test_custom_signals.py`, 12): validation failures, any/all
+  detection, disabled spec, end-to-end CSV export, add/remove column parity,
+  filter-on-custom-column end-to-end.
+
+## 2. summary.json (per campaign)
+
+- New `scraper/utils/resources.py`: `ResourceMonitor` (psutil when available,
+  stdlib fallback) samples process+children CPU % and RSS on a daemon thread;
+  `host_details()` reports platform/python/CPU count/total RAM.
+- New `SummaryConfig` (`summary.enabled`, `summary.sample_interval_seconds`);
+  written to `output/<client_name>/summary.json` in a `finally` block, so a
+  mid-run crash still produces the summary.
+- Structure: `campaign_id`, `generated_at`, `cpu_max_usage_percent`,
+  `ram_consumed_mb` (peak, process+children), `ram_final_mb`,
+  `execution_time_seconds`, `counters`, `campaign_details` (queries, output
+  files, concurrency, maps, reviews, filters, custom signals), `servers`
+  (per-host environment + metric details), `leads` (every committed row with
+  all columns incl. custom signals).
+- Dependency: `psutil>=5.9,<8` added (requirements.txt + pyproject).
+- Tests (`tests/test_summary.py`, 3): required fields, disabled = no file,
+  custom signals echoed in campaign_details.
+
+## 3. Wiring audit — zero decorative variables
+
+New `tests/test_config_wiring.py::test_every_config_key_is_operational` parses
+every leaf key of config.yaml and requires a reader in scraper source outside
+config.py. This audit exposed 19 previously decorative keys, now wired:
+
+| Key | Wiring |
+|---|---|
+| `website.require_website` | hard pre-enrichment gate: drop records with no website (`pipeline._dedup_and_prefilter`) |
+| `enrichment.require_website` | skip the whole website stage for no-website records (`_enrich_and_stage`) |
+| `website.enable_playwright_fallback` | new `scraper/websites/renderer.py`: thread-local Playwright render for JS_REQUIRED sites |
+| `website.page_navigation_timeout_seconds` | renderer goto timeout |
+| `website.enable_sitemap` | sitemap.xml discovery merged into the priority crawl (`enricher.enrich` + `crawler.crawl_sitemap_aware`) |
+| `website.http_connect_timeout_seconds` | httpx connect phase cap (`Fetcher`) |
+| `website.http_retries` | retry attempts with linear backoff on transient errors (`Fetcher.fetch`) |
+| `runtime.request_timeout` | per-request phase cap (`Fetcher.total_timeout`) |
+| `runtime.idle_exit_seconds` | run-level watchdog: graceful stop when no leads committed for N seconds (`Pipeline._idle_exceeded`, `_RunIdle`) |
+| `runtime.pacing` | multiplier on the between-query Maps delay (`main._build_collector`) |
+| `maps.max_scrolls` | scroll-round cap in `_scroll_results` (0 = built-in bound 12) |
+| `maps.scroll_pause_seconds` | settle wait when the feed height stalls (lazy-loaded cards) |
+| `job.output_filename` | optional CSV filename override (`Pipeline.__init__`) |
+| `email.enable_mx_check` | switches the MX checker on (`Pipeline`, OR with `enrichment.mx_verify`) |
+| `analysis.lexicon_hint` | `analysis.engine.extend_lexicon`: JSON/YAML custom sentiment lexicon (single-token entries) |
+| `smtp.connection_timeout_seconds` | TCP connect cap for port-25 verification (`SMTPVerifier`) |
+| `delays.site_min_seconds` / `site_max_seconds` | same-site crawl pacing (`Enricher` page loop) |
+| `website.overall_site_timeout_seconds` | whole-site crawl deadline (`Enricher.enrich`) |
+
+`job.output_filename` note: empty keeps the historical `leads.csv` name —
+existing consumers unaffected (backward compatible).
+
+## Tests
+
+Suite grew 224 → 242 passing (18 new: signals/summary/wiring). Full suite,
+compileall, and the F25 dead-section guard all green.

@@ -34,10 +34,15 @@ def _build_collector(config, demo: bool, browser_manager, progress=None):
         scroll_delay=(m.scroll_delay_min_ms, m.scroll_delay_max_ms),
         cooldown_seconds=config.delays.cooldown_seconds,
         hl=m.hl, gl=m.gl,
-        maps_delay=(config.delays.maps_min_seconds, config.delays.maps_max_seconds),
+        # runtime.pacing scales the between-query Maps delay (1.0 = as
+        # configured; >1 slower/cautious, <1 faster/riskier).
+        maps_delay=(config.delays.maps_min_seconds * config.runtime.pacing,
+                    config.delays.maps_max_seconds * config.runtime.pacing),
         reviews_per_business=config.reviews.per_business,
         collect_reviews=config.reviews.enabled,
         on_query_total=(progress.set_query_total if progress is not None else None),
+        max_scrolls=m.max_scrolls,
+        scroll_pause_seconds=m.scroll_pause_seconds,
     )
 
 

@@ -13,18 +13,22 @@ Returns a single ``Enrichment`` dataclass the pipeline maps onto the schema.
 from __future__ import annotations
 
 import logging
+import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urljoin
 
 from ..email.extract import clean_emails, extract_emails
 from ..email.verification import MXChecker, SMTPVerifier
-from ..models import resolve_website_status
+from ..models import FailureReason, resolve_website_status
 from ..signals.detector import PageContext, SignalDetector, extract_decision_maker
 from ..signals.social import detect_social, social_urls_from_html
 from ..utils.normalize import normalize_text, normalize_url
-from .crawler import crawl_priority, early_stop_reached
-from .fetcher import Fetcher
+from .crawler import crawl_priority, crawl_sitemap_aware
+from .fetcher import Fetcher, FetchResult
+from .renderer import PlaywrightRenderer
 from .tech_detect import TechDetector
 
 log = logging.getLogger(__name__)
@@ -55,9 +59,26 @@ class Enricher:
                  decision_makers: bool = False,
                  proxies_cfg=None, proxy_manager=None,
                  exclude_selectors: list | None = None,
-                 max_email_length: int = 120):
-        self._fetcher = Fetcher(timeout=timeout, proxy=proxies)
+                 max_email_length: int = 120,
+                 total_request_timeout: float = 0.0,
+                 overall_site_timeout_seconds: float = 0.0,
+                 connect_timeout: float = 0.0, http_retries: int = 0,
+                 enable_sitemap: bool = True,
+                 enable_playwright_fallback: bool = True,
+                 page_navigation_timeout_seconds: float = 30.0,
+                 site_delay: tuple = (0.0, 0.0)):
+        self._fetcher = Fetcher(timeout=timeout, proxy=proxies,
+                                total_timeout=total_request_timeout,
+                                connect_timeout=connect_timeout,
+                                retries=http_retries)
         self._max_pages = max_pages
+        # website.overall_site_timeout_seconds: wall-clock budget for the WHOLE
+        # site crawl (homepage + priority pages); 0 = unlimited.
+        self._overall_timeout = float(overall_site_timeout_seconds or 0.0)
+        self._enable_sitemap = bool(enable_sitemap)
+        self._site_delay = site_delay
+        self._renderer = (PlaywrightRenderer(page_navigation_timeout_seconds)
+                          if enable_playwright_fallback else None)
         self._mx = mx_checker
         self._smtp = smtp_verifier
         self._signals = signal_detector or SignalDetector()
@@ -71,12 +92,22 @@ class Enricher:
         if not website or website.strip().upper() == "N/A":
             return Enrichment()
 
-        # 1. Fetch homepage.
+        # 1. Fetch homepage. When the site is JS-only (JS_REQUIRED) and
+        #    website.enable_playwright_fallback is on, render with Chromium.
         result = self._fetcher.fetch(website)
+        if (result.reason == FailureReason.JS_REQUIRED
+                and self._renderer is not None):
+            rendered = self._renderer.render(result.final_url or website)
+            if rendered:
+                result = FetchResult(result.url, 200, rendered,
+                                     result.reason, result.final_url, {})
         reason = result.reason or ""
         status = resolve_website_status(reason) if reason else "LIVE"
 
-        # 2. Crawl a bounded set of internal pages (aggregating HTML).
+        # 2. Crawl a bounded set of internal pages (aggregating HTML),
+        #    respecting the overall site deadline when configured.
+        deadline = (time.monotonic() + self._overall_timeout
+                    if self._overall_timeout > 0 else None)
         htmls: list[str] = []
         if result.html:
             htmls.append(result.html)
@@ -85,13 +116,33 @@ class Enricher:
                                        self._max_pages)
             except Exception:
                 extra = []
+            # website.enable_sitemap: merge sitemap.xml-discovered pages into
+            # the priority crawl when the toggle is on.
+            if self._enable_sitemap:
+                try:
+                    sm = self._fetcher.fetch(urljoin(website, "/sitemap.xml"))
+                    if sm.html:
+                        sitemap_urls = crawl_sitemap_aware(
+                            sm.html, website)[: self._max_pages]
+                        extra = list(dict.fromkeys(
+                            list(extra) + list(sitemap_urls)))
+                except Exception:
+                    pass
+            lo, hi = self._site_delay
             for page_url in extra[: self._max_pages]:
+                if deadline is not None and time.monotonic() > deadline:
+                    log.debug("overall site deadline hit for %s", website)
+                    break
                 try:
                     pr = self._fetcher.fetch(page_url)
                     if pr.html:
                         htmls.append(pr.html)
                 except Exception:
                     continue
+                # delays.site_min_seconds/site_max_seconds: polite pacing
+                # between same-site page fetches.
+                if hi > 0:
+                    time.sleep(random.uniform(lo, hi) if hi > lo else hi)
 
         combined_html = "\n".join(htmls)
         combined_text = normalize_text(self._strip_text(combined_html))

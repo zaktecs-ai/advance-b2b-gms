@@ -216,6 +216,59 @@ class SignalsConfig(BaseModel):
     pass
 
 
+class SignalsConfig(BaseModel):
+    """Config-driven custom website signals.
+
+    Each entry creates a YES/NO export column:
+        signals:
+          custom:
+            emergency_service:
+              column: signal_emergency_service   # export column name
+              match: any                         # any = OR, all = AND
+              keywords: ["24/7", "emergency plumber"]
+              enabled: true
+    """
+
+    custom: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_specs(self):
+        seen_columns: set[str] = set()
+        for name, spec in self.custom.items():
+            if not re.fullmatch(r"[a-z0-9_]+", str(name)):
+                raise ValueError(
+                    f"signals.custom name {name!r} must be lowercase "
+                    f"[a-z0-9_]")
+            if not isinstance(spec, dict):
+                raise ValueError(f"signals.custom.{name} must be a mapping")
+            column = str(spec.get("column") or f"signal_{name}").strip().lower()
+            if not re.fullmatch(r"[a-z0-9_]{1,64}", column):
+                raise ValueError(
+                    f"signals.custom.{name}.column {column!r} must be "
+                    f"[a-z0-9_] (max 64 chars)")
+            if column in seen_columns:
+                raise ValueError(
+                    f"signals.custom.{name}: duplicate column {column!r}")
+            seen_columns.add(column)
+            keywords = spec.get("keywords") or []
+            regexes = spec.get("regex") or []
+            if spec.get("enabled", True) and not keywords and not regexes:
+                raise ValueError(
+                    f"signals.custom.{name}: enabled signals need at least "
+                    f"one keyword or regex")
+            if str(spec.get("match", "any")).lower() not in ("any", "all"):
+                raise ValueError(
+                    f"signals.custom.{name}.match must be 'any' or 'all'")
+        return self
+
+
+class SummaryConfig(BaseModel):
+    """summary.json generation (per-campaign resource + lead report)."""
+
+    enabled: bool = True
+    sample_interval_seconds: float = Field(default=2.0, ge=0.5, le=60.0)
+
+
 class CountryConfig(BaseModel):
     default: str = "US"
 
@@ -240,6 +293,8 @@ class AppConfig(BaseModel):
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     filters: FilterConfig = Field(default_factory=FilterConfig)
+    signals: SignalsConfig = Field(default_factory=SignalsConfig)
+    summary: SummaryConfig = Field(default_factory=SummaryConfig)
     country: CountryConfig = Field(default_factory=CountryConfig)
 
     @model_validator(mode="after")

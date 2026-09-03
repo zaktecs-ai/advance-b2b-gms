@@ -80,6 +80,30 @@ _JUNK_TOKENS = {
 }
 
 
+def extend_lexicon(path) -> None:
+    """Load a custom sentiment lexicon and merge it into the module sets.
+
+    ``analysis.lexicon_hint`` in config.yaml points at a JSON or YAML file:
+        {"positive": ["punctual", "warranty"], "negative": ["hidden fees"→"hidden"]}
+    NOTE: sentiment scoring matches single TOKENS (reviews are tokenized), so
+    only single-word entries are effective; multi-word phrases are accepted
+    into the sets but will not match tokenized reviews.
+    Missing file raises FileNotFoundError — fail fast, config promised it.
+    """
+    import json
+    from pathlib import Path
+
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() in (".yaml", ".yml"):
+        import yaml
+        data = yaml.safe_load(text) or {}
+    else:
+        data = json.loads(text)
+    _POSITIVE.update(str(w).lower() for w in (data.get("positive") or []))
+    _NEGATIVE.update(str(w).lower() for w in (data.get("negative") or []))
+
+
 def sentiment_score(reviews: list[str]) -> float:
     """Return a -1..1 mean sentiment using a transparent lexicon."""
     if not reviews:

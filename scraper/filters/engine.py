@@ -173,13 +173,19 @@ def cond_fields(conds: list[Any]) -> set[str]:
     return out
 
 
-def split_filters(filters: dict) -> tuple[dict, dict]:
-    """Split a filters config into (pre_enrichment, post_enrichment)."""
+def split_filters(filters: dict, extra_post_fields=()) -> tuple[dict, dict]:
+    """Split a filters config into (pre_enrichment, post_enrichment).
+
+    ``extra_post_fields`` lets callers declare runtime-generated columns
+    (e.g. config-driven custom signal columns) that only exist after
+    enrichment, so their conditions are evaluated in pass 2.
+    """
+    enrichment_fields = _ENRICHMENT_FIELDS | set(extra_post_fields or ())
     pre: dict = {}
     post: dict = {}
     for key in ("include_all", "include_any", "exclude_all", "exclude_any"):
         conds = filters.get(key, [])
-        post_conds = [c for c in conds if cond_fields([c]) & _ENRICHMENT_FIELDS]
+        post_conds = [c for c in conds if cond_fields([c]) & enrichment_fields]
         pre_conds = [c for c in conds if c not in post_conds]
         if pre_conds:
             pre[key] = pre_conds

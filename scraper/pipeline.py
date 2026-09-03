@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 from .analysis.engine import analyze
@@ -35,12 +37,18 @@ from .maps.geo import geojson_polygons, point_in_any_polygon
 from .maps.reviews import filter_reviews
 from .maps.transform import normalize_listing
 from .models import OUTPUT_COLUMNS
+from .signals.detector import SignalDetector
 from .signals.social import detect_social
 from .utils.normalize import normalize_text
+from .utils.resources import ResourceMonitor, host_details
 from .validation.quality import passes_quality
 from .websites.enricher import Enricher
 
 log = logging.getLogger(__name__)
+
+
+class _RunIdle(RuntimeError):
+    """Raised to stop a run gracefully when no new leads are committed."""
 
 _SOCIAL_COLS = ["facebook", "instagram", "linkedin", "youtube", "twitter_x",
                 "tiktok", "pinterest", "github", "snapchat"]
@@ -99,11 +107,42 @@ class Pipeline:
         self._proxy_manager = proxy_manager
         from .utils.progress import NullProgress
         self._progress = progress or NullProgress()
+
+        # -- Config-driven custom signals (signals.custom) ------------------
+        # Each enabled spec becomes a YES/NO column appended to the export
+        # schema. The user chooses the column name; removal from config.yaml
+        # removes the column — no decorative keys.
+        self._custom_signal_specs = {
+            name: dict(spec)
+            for name, spec in (config.signals.custom or {}).items()
+            if isinstance(spec, dict) and spec.get("enabled", True)
+        }
+        self.custom_signal_columns = [
+            str(spec.get("column") or f"signal_{name}").strip().lower()
+            for name, spec in self._custom_signal_specs.items()
+        ]
+        _collide = sorted(set(self.custom_signal_columns) & set(OUTPUT_COLUMNS))
+        if _collide:
+            raise ValueError(
+                f"signals.custom column(s) collide with the built-in schema: "
+                f"{_collide} — choose different names")
+        self.output_columns = tuple(OUTPUT_COLUMNS) + tuple(
+            self.custom_signal_columns)
+
+        # -- job.output_filename: optional override of the CSV base name ----
+        csv_name = (f"{config.job.output_filename}"
+                    if config.job.output_filename else "leads.csv")
+
+        # -- analysis.lexicon_hint: optional custom sentiment lexicon -------
+        if config.analysis.lexicon_hint:
+            from .analysis.engine import extend_lexicon
+            extend_lexicon(config.analysis.lexicon_hint)
+
         out_dir = Path(config.job.output_dir) / config.job.client_name
         out_dir.mkdir(parents=True, exist_ok=True)
         self.out_dir = out_dir
         self.checkpoint = CheckpointStore(out_dir / "checkpoint.sqlite")
-        self.csv = AtomicCSVWriter(out_dir / "leads.csv", OUTPUT_COLUMNS)
+        self.csv = AtomicCSVWriter(out_dir / csv_name, list(self.output_columns))
         self._reconcile_csv_with_checkpoint()
         # G13: serial-pass guard against cross-business social contamination.
         self._social_registry = SocialOwnershipRegistry()
@@ -118,14 +157,18 @@ class Pipeline:
             default_country=config.job.default_country,
         )
 
-        # Email verification (native, off by default).
-        self.mx_checker = MXChecker(enabled=config.enrichment.mx_verify)
+        # Email verification (native, off by default). email.enable_mx_check
+        # is the per-email toggle; enrichment.mx_verify the pipeline toggle —
+        # either one switches the MX checker on.
+        self.mx_checker = MXChecker(
+            enabled=config.enrichment.mx_verify or config.email.enable_mx_check)
         self.smtp_verifier = SMTPVerifier(
             enabled=config.enrichment.smtp_verify,
             timeout=config.smtp.verification_timeout_seconds,
             from_email=config.smtp.from_email,
             retries=config.smtp.retries,
             max_workers=config.smtp.workers,
+            connect_timeout=config.smtp.connection_timeout_seconds,
         )
 
         max_pages = config.website.max_pages_per_site
@@ -137,6 +180,16 @@ class Pipeline:
         self.enricher = Enricher(
             timeout=config.website.http_read_timeout_seconds,
             max_pages=max_pages,
+            signal_detector=SignalDetector(self._custom_signal_specs),
+            total_request_timeout=config.runtime.request_timeout,
+            overall_site_timeout_seconds=config.website.overall_site_timeout_seconds,
+            connect_timeout=config.website.http_connect_timeout_seconds,
+            http_retries=config.website.http_retries,
+            enable_sitemap=config.website.enable_sitemap,
+            enable_playwright_fallback=config.website.enable_playwright_fallback,
+            page_navigation_timeout_seconds=config.website.page_navigation_timeout_seconds,
+            site_delay=(config.delays.site_min_seconds,
+                        config.delays.site_max_seconds),
             proxies=proxy_url,
             mx_checker=self.mx_checker,
             smtp_verifier=self.smtp_verifier,
@@ -159,11 +212,25 @@ class Pipeline:
         )
 
         self.pre_filters, self.post_filters = split_filters(
-            config.filters.model_dump() if config.filters else {}
+            config.filters.model_dump() if config.filters else {},
+            extra_post_fields=set(self.custom_signal_columns),
         )
         self.polygons = geojson_polygons(config.geo.polygons) if config.geo.polygons else []
         self.counters = {"collected": 0, "deduped": 0, "filtered": 0,
                          "committed": 0, "failed": 0}
+        # -- runtime.idle_exit_seconds + summary.json state -----------------
+        self._started_mono = time.monotonic()
+        self._idle_exit_seconds = float(config.runtime.idle_exit_seconds or 0.0)
+        self._last_commit_mono = self._started_mono
+        self._summary_leads: list[dict] = []
+        self._monitor: ResourceMonitor | None = None
+
+    def _idle_exceeded(self) -> bool:
+        """True when runtime.idle_exit_seconds > 0 and no lead has been
+        committed for longer than that window."""
+        return (self._idle_exit_seconds > 0
+                and (time.monotonic() - self._last_commit_mono)
+                > self._idle_exit_seconds)
 
     def _reconcile_csv_with_checkpoint(self) -> None:
         """Trim CSV rows that were durably written but never committed.
@@ -189,28 +256,47 @@ class Pipeline:
 
     # -- collection ----------------------------------------------------------
     def run(self) -> dict:
-        for idx, query in enumerate(self.cfg.queries, start=1):
-            if self.checkpoint.is_query_done(query):
-                self._progress.note(f"skipped (already done): {query}")
-                continue
-            self.checkpoint.register_query(query)
-            self._progress.query_started(idx, query)
-            try:
-                self._process_query(query)
-            except Exception as e:
-                log.error("query %r failed: %s (left un-done for retry)", query, e)
-                self._progress.note(f"query failed (will retry next run): {query}")
-                self.checkpoint.mark_query_failed(query)
-                continue
-            self.checkpoint.mark_query_done(query)
-            self._progress.query_done()
-            if self._bm is not None:
-                self._bm.mark_query()
-                self._bm.recycle()
+        if self.cfg.summary.enabled:
+            self._monitor = ResourceMonitor(
+                self.cfg.summary.sample_interval_seconds)
+            self._monitor.start()
+        try:
+            for idx, query in enumerate(self.cfg.queries, start=1):
+                if self.checkpoint.is_query_done(query):
+                    self._progress.note(f"skipped (already done): {query}")
+                    continue
+                if self._idle_exceeded():
+                    self._progress.note(
+                        f"idle exit: no new leads for "
+                        f"{self._idle_exit_seconds:.0f}s — stopping run")
+                    break
+                self.checkpoint.register_query(query)
+                self._progress.query_started(idx, query)
+                try:
+                    self._process_query(query)
+                except _RunIdle:
+                    self._progress.note(
+                        f"idle exit: no new leads for "
+                        f"{self._idle_exit_seconds:.0f}s — stopping run")
+                    break
+                except Exception as e:
+                    log.error("query %r failed: %s (left un-done for retry)",
+                              query, e)
+                    self._progress.note(
+                        f"query failed (will retry next run): {query}")
+                    self.checkpoint.mark_query_failed(query)
+                    continue
+                self.checkpoint.mark_query_done(query)
+                self._progress.query_done()
+                if self._bm is not None:
+                    self._bm.mark_query()
+                    self._bm.recycle()
 
-        self._progress.finish(failed=self.counters['failed'])
-        self._finalize()
-        return self.counters
+            self._progress.finish(failed=self.counters['failed'])
+            return self.counters
+        finally:
+            # Summary + XLSX are produced even when a query crashed mid-run.
+            self._finalize()
 
     def _process_query(self, query: str) -> None:
         keyword = self._split_keyword(query)
@@ -253,6 +339,14 @@ class Pipeline:
             self.counters["deduped"] += 1
             self._progress.business_dup()
             return None
+        # website.require_website: a hard config gate — records with no
+        # website never proceed, regardless of the filters section.
+        if self.cfg.website.require_website and rec.get(
+                "website", "N/A") in (None, "", "N/A"):
+            self.resolver.rollback(rec)
+            self.counters["filtered"] += 1
+            self._progress.business_filtered()
+            return None
         keep, _ = evaluate(rec, self.pre_filters)
         if not keep:
             self.resolver.rollback(rec)
@@ -277,6 +371,9 @@ class Pipeline:
                 self._safe_enrich(rec)
         for rec, sig in batch:
             self._commit_stage(rec, query, sig)
+        if self._idle_exceeded():
+            raise _RunIdle(
+                f"no new leads committed for {self._idle_exit_seconds:.0f}s")
 
     def _safe_enrich(self, rec: dict) -> None:
         """Enrich one record without letting a single failure abort the batch.
@@ -301,6 +398,12 @@ class Pipeline:
         concurrent calls only touch their own ``rec`` dict.
         """
         website = rec.get("website")
+        # enrichment.require_website: skip the whole website stage (fetch,
+        # signals, emails, tech) for records without a website instead of
+        # wasting a doomed fetch.
+        if self.cfg.enrichment.require_website and website in (None, "", "N/A"):
+            rec["website_status"] = "SKIPPED_NO_WEBSITE"
+            return
         self._enrich(rec, website)
         self._analyze(rec)
         self._apply_llm_hook(rec)
@@ -330,13 +433,15 @@ class Pipeline:
                         "social %s already owned by another record — "
                         "blanking on %s", u, rec.get("business_name"))
                     rec[c] = "N/A"
-        row = {c: rec.get(c, "N/A") for c in OUTPUT_COLUMNS}
+        row = {c: rec.get(c, "N/A") for c in self.output_columns}
         idx = self.csv.append(row)
         self.checkpoint.register_record(
             record_id=rec["record_id"], identity_key=sig.get("identity_key", ""),
             sig=sig, source_query=query, raw=rec)
         self.checkpoint.mark_committed(rec["record_id"], idx)
         self.counters["committed"] += 1
+        self._last_commit_mono = time.monotonic()
+        self._summary_leads.append(row)
         self._progress.business_saved()
 
     @staticmethod
@@ -425,6 +530,11 @@ class Pipeline:
         for c in _SIGNAL_COLS:
             rec[c] = enr.signals.get(c, "NO")
 
+        # Config-driven custom signal columns (signals.custom) — YES/NO from
+        # the website content, exported under the user-chosen column names.
+        for c in self.custom_signal_columns:
+            rec[c] = enr.signals.get(c, "NO")
+
         # MX / SMTP verification for the first extracted email (native).
         # `mx_enabled` / `smtp_enabled` were removed from the export (schema
         # section 4): `mx_status`=Not Checked already conveys "disabled".
@@ -469,12 +579,68 @@ class Pipeline:
         # Write the XLSX + summary while the checkpoint is still open, then
         # tear everything down through the shared idempotent close().
         try:
-            write_xlsx(self.out_dir / "leads.xlsx", OUTPUT_COLUMNS,
+            write_xlsx(self.out_dir / "leads.xlsx", list(self.output_columns),
                        self.checkpoint.iter_committed_rows())
         except Exception as e:  # noqa: BLE001
             log.warning("xlsx write skipped: %s", e)
-        write_summary(self.out_dir / "summary.json", self.counters)
+        if self.cfg.summary.enabled:
+            self._write_run_summary()
         self.close()
+
+    def _write_run_summary(self) -> None:
+        """Build the per-campaign summary.json (metrics + leads)."""
+        if self._monitor is not None:
+            metrics = self._monitor.stop()
+            self._monitor = None
+        else:
+            metrics = {"method": "not-sampled", "cpu_max_usage_percent": 0.0,
+                       "ram_consumed_mb": 0.0, "ram_final_mb": 0.0}
+        host = host_details()
+        doc = {
+            "campaign_id": self.cfg.job.client_name,
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "cpu_max_usage_percent": metrics["cpu_max_usage_percent"],
+            "ram_consumed_mb": metrics["ram_consumed_mb"],
+            "ram_final_mb": metrics["ram_final_mb"],
+            "execution_time_seconds": round(
+                time.monotonic() - self._started_mono, 2),
+            "counters": dict(self.counters),
+            "campaign_details": {
+                "client_name": self.cfg.job.client_name,
+                "queries": list(self.cfg.queries),
+                "output_dir": str(self.out_dir),
+                "output_files": (sorted(p.name for p in self.out_dir.iterdir())
+                                 if self.out_dir.exists() else []),
+                "concurrency": {
+                    "website_workers": self.cfg.concurrency.website_workers,
+                    "playwright_workers": self.cfg.concurrency.playwright_workers,
+                },
+                "maps": {"zoom": self.cfg.maps.zoom, "hl": self.cfg.maps.hl,
+                          "gl": self.cfg.maps.gl,
+                          "headless": self.cfg.maps.headless},
+                "reviews": {"enabled": self.cfg.reviews.enabled,
+                             "per_business": self.cfg.reviews.per_business},
+                "filters": self.cfg.filters.model_dump(),
+                "custom_signals": {
+                    name: dict(spec)
+                    for name, spec in self._custom_signal_specs.items()
+                },
+            },
+            "servers": [{
+                "name": host.get("name", "localhost"),
+                "details": {
+                    "platform": host.get("platform"),
+                    "python_version": host.get("python_version"),
+                    "cpu_count_logical": host.get("cpu_count_logical"),
+                    "total_ram_mb": host.get("total_ram_mb"),
+                    "cpu_max_usage_percent": metrics["cpu_max_usage_percent"],
+                    "ram_peak_mb": metrics["ram_consumed_mb"],
+                    "metrics_method": metrics["method"],
+                },
+            }],
+            "leads": self._summary_leads,
+        }
+        write_summary(self.out_dir / "summary.json", doc)
 
     def close(self) -> None:
         """Idempotent teardown: CSV → enricher → checkpoint → collector.

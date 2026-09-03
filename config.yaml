@@ -141,6 +141,29 @@ analysis:
   enabled: true
   lexicon_hint: ""
 
+# --- Config-driven custom website signals (YES/NO export columns) -----------
+#  Each entry scans the fetched website content for the keywords and emits a
+#  column named `column` (YES when found). `match: any` = OR across keywords,
+#  `match: all` = AND. Conditions on these columns may be used in `filters:`.
+signals:
+  custom: {}
+  #  emergency_service:
+  #    column: signal_emergency_service
+  #    match: any
+  #    keywords: ["24/7", "emergency plumber", "same day service"]
+  #  modern_tech:
+  #    column: uses_online_booking
+  #    match: all
+  #    keywords: ["book online", "appointment"]
+
+# --- Per-campaign summary.json (metrics + leads) ----------------------------
+#  Written to output/<client_name>/summary.json after every run: peak CPU
+#  usage, RAM consumption, elapsed time, full campaign details and every
+#  committed lead row.
+summary:
+  enabled: true
+  sample_interval_seconds: 2.0
+
 country:
   default: US
 

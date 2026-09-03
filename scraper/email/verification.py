@@ -72,11 +72,13 @@ class SMTPVerifier:
 
     def __init__(self, enabled: bool = False, timeout: float = 15.0,
                  from_email: str = "verify@example.com", retries: int = 1,
-                 max_workers: int = 3):
+                 max_workers: int = 3, connect_timeout: float = 0.0):
         self.enabled = enabled
         self.timeout = timeout
         self.from_email = from_email
         self.retries = retries
+        # smtp.connection_timeout_seconds: TCP connect (port 25) cap.
+        self.connect_timeout = connect_timeout if connect_timeout > 0 else timeout
         self._mx_cache: dict = {}
         self._mx_cache_lock = threading.Lock()
         self.max_workers = max(1, max_workers)
@@ -156,7 +158,7 @@ class SMTPVerifier:
         """
         with self._gate:
             with smtplib.SMTP(timeout=self.timeout) as smtp:
-                code, _ = smtp.connect(host, 25)
+                code, _ = smtp.connect(host, 25, timeout=self.connect_timeout)
                 if code != 220:
                     return "Connection Failed", f"greeting_{code}"
                 smtp.ehlo()

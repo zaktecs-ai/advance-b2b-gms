@@ -347,7 +347,8 @@ class MapsCollector:
                  hl: str = "en", gl: str = "us",
                  maps_delay: tuple = (0.0, 0.0),
                  reviews_per_business: int = 5, collect_reviews: bool = True,
-                 on_query_total=None):
+                 on_query_total=None,
+                 max_scrolls: int = 0, scroll_pause_seconds: float = 0.0):
         self._bm = browser_manager
         self._max_per_query = max_results_per_query
         self._max_total = max_total_results
@@ -360,6 +361,11 @@ class MapsCollector:
         self._reviews_per_business = reviews_per_business
         self._collect_reviews = collect_reviews
         self._on_query_total = on_query_total  # callable(len(listing_links))
+        # maps.max_scrolls: hard cap on scroll rounds (0 = built-in safety
+        # bound of 12). maps.scroll_pause_seconds: extra settle wait when the
+        # feed height stops growing (lazy-loaded results), 0 = skip.
+        self._max_scrolls = max_scrolls
+        self._scroll_pause_seconds = scroll_pause_seconds
         self._yielded_total = 0
         self.limit_reached = False
 
@@ -673,7 +679,11 @@ class MapsCollector:
         except Exception:
             feed = None
 
-        for _ in range(12):
+        # maps.max_scrolls: 0 = built-in safety bound (12 rounds).
+        max_rounds = self._max_scrolls if self._max_scrolls > 0 else 12
+        last_height = -1
+        stalled = 0
+        for _ in range(max_rounds):
             try:
                 if feed is not None:
                     feed.evaluate("el => el.scrollTo(0, el.scrollHeight)")
@@ -685,6 +695,24 @@ class MapsCollector:
             time.sleep(random.uniform(lo, hi) / 1000.0)
             if self._has_no_more_results(page):
                 break
+            # maps.scroll_pause_seconds: when the feed height stops growing,
+            # lazy-loaded cards may still be inflight — wait and retry a
+            # bounded number of times before giving up.
+            height = -1
+            try:
+                if feed is not None:
+                    height = int(feed.evaluate("el => el.scrollHeight"))
+            except Exception:
+                height = -1
+            if height == last_height:
+                stalled += 1
+                if self._scroll_pause_seconds > 0:
+                    time.sleep(self._scroll_pause_seconds)
+                if stalled >= 3:
+                    break
+            else:
+                stalled = 0
+            last_height = height
 
     def _has_no_more_results(self, page) -> bool:
         try:

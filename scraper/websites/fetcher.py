@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import socket
 import ssl
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -90,30 +91,50 @@ def _status_reason(status: int) -> str | None:
 
 class Fetcher:
     def __init__(self, timeout: float = 20.0, follow_redirects: bool = True,
-                 proxy: str | None = None):
+                 proxy: str | None = None, total_timeout: float = 0.0,
+                 connect_timeout: float = 0.0, retries: int = 0):
         self.timeout = timeout
+        self.retries = max(0, int(retries))
+        # runtime.request_timeout caps each HTTP PHASE (httpx has no whole-
+        # request 'total'); website.http_connect_timeout_seconds separately
+        # caps the connect phase. 0 values defer to `timeout`.
+        connect = connect_timeout if connect_timeout > 0 else timeout
+        read = min(timeout, total_timeout) if total_timeout > 0 else timeout
+        cap = min(connect, read)
+        kw_timeout = httpx.Timeout(read, connect=cap, read=read,
+                                   write=read, pool=cap)
         kw = {}
         if proxy:
             kw["proxy"] = proxy
         self._client = httpx.Client(
-            headers=_HEADERS, timeout=timeout,
+            headers=_HEADERS, timeout=kw_timeout,
             follow_redirects=follow_redirects, **kw,
         )
 
     def fetch(self, url: str) -> FetchResult:
-        """Fetch a URL; returns a FetchResult with a classified reason."""
+        """Fetch a URL; returns a FetchResult with a classified reason.
+
+        website.http_retries controls retry attempts on transient network
+        errors (timeouts / connection errors), with a small linear backoff.
+        """
         if not url or url.strip().upper() == "N/A":
             return FetchResult(url or "", None, "", "N/A_reason", url, {})
-        try:
-            resp = self._client.get(url)
-            reason = _status_reason(resp.status_code)
-            if resp.status_code == 200 and len(resp.content) < 500:
-                reason = FailureReason.JS_REQUIRED
-            headers = {k.lower(): v for k, v in resp.headers.items()}
-            return FetchResult(url, resp.status_code, resp.text, reason,
-                               str(resp.url), headers)
-        except httpx.HTTPError as e:
-            return FetchResult(url, None, "", _classify(e), url, {})
+        attempts = self.retries + 1
+        last: FetchResult | None = None
+        for attempt in range(attempts):
+            try:
+                resp = self._client.get(url)
+                reason = _status_reason(resp.status_code)
+                if resp.status_code == 200 and len(resp.content) < 500:
+                    reason = FailureReason.JS_REQUIRED
+                headers = {k.lower(): v for k, v in resp.headers.items()}
+                return FetchResult(url, resp.status_code, resp.text, reason,
+                                   str(resp.url), headers)
+            except httpx.HTTPError as e:
+                last = FetchResult(url, None, "", _classify(e), url, {})
+                if attempt + 1 < attempts:
+                    time.sleep(min(2.0, 0.5 * (attempt + 1)))
+        return last
 
     def close(self):
         try:

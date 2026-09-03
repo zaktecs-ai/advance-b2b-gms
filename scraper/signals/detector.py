@@ -198,6 +198,17 @@ def _kw_signal(ctx, keywords):
     return False, None
 
 
+def _kw_signal_all(ctx, keywords):
+    """ALL-match (AND): every keyword must be present for the signal to fire."""
+    blob = (ctx.text or "").lower() + " " + (ctx.html or "").lower()
+    if not keywords:
+        return False, None
+    for kw in keywords:
+        if not _kw_in_blob(kw, blob):
+            return False, None
+    return True, keywords[0]
+
+
 RICH_SIGNALS: dict = {
     "meta_pixel":        {"fields": ["meta_pixel"], "fn": _meta_pixel},
     "ga4":               {"fields": ["ga4"], "fn": _ga4},
@@ -238,8 +249,16 @@ class SignalDetector:
             if not isinstance(spec, dict) or not spec.get("enabled", True):
                 continue
             kws = spec.get("keywords", []) or []
-            detected, ev = _kw_signal(ctx, kws)
-            outcome[f"signal_{name}"] = "YES" if detected else "NO"
+            # match: any = OR across keywords (default); match: all = AND —
+            # multiple distinct keyword filters combined into one signal.
+            if str(spec.get("match", "any")).lower() == "all":
+                detected, ev = _kw_signal_all(ctx, kws)
+            else:
+                detected, ev = _kw_signal(ctx, kws)
+            # Config-driven custom signals may choose their own export column
+            # name via `column:`; the legacy default key is signal_<name>.
+            out_key = str(spec.get("column") or f"signal_{name}").strip().lower()
+            outcome[out_key] = "YES" if detected else "NO"
             if detected and ev:
                 evidence[name] = ev
         return outcome, evidence
