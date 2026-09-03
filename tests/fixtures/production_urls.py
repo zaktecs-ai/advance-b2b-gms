@@ -57,3 +57,12 @@ IGD_DUP_B = {
     "website": "https://igdplumbing.com", "business_name": "IGD Plumbing & Air",
     "city": "Houston",
 }
+
+# G02: a search-level fallback URL at 10z whose `!8m2!3d…!4d…` pair is the map
+# CAMERA position, not the pin. Production proof (G2-E): four distinct
+# address-less businesses (Speedway / Plumbing Life / Blanco Brothers / P&G)
+# all reported `29.836095,-95.46119` from URLs of exactly this shape.
+LOW_ZOOM_VIEWPORT_URL = (
+    "https://www.google.com/maps/place/Speedway+Plumbing+Houston+Texas/"
+    "@29.836095,-95.46119,10z/data=!3m1!4b1!4m6!3m5!1s0x8640c216aa5a1427:0x17a1450e1a2afa6c"
+    "!8m2!3d29.836095!4d-95.46119!16s%2Fg%2F11bwyxw8fj")

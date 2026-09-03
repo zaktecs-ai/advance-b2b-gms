@@ -1,6 +1,7 @@
 """Maps parsing: rating/reviews, address decomposition, URL parsing."""
 from scraper.maps.parsing import (
     classify_open_status,
+    clean_maps_url,
     decompose_address,
     parse_address,
     parse_google_maps_url,
@@ -92,6 +93,7 @@ from tests.fixtures.production_urls import (
     FULL_PLACE_URL,
     KGID_ENCODED_URL,
     KGID_PLAIN_URL,
+    LOW_ZOOM_VIEWPORT_URL,
     VIEWPORT_ONLY_URL,
     VIEWPORT_PLUS_PIN_URL,
 )
@@ -120,8 +122,44 @@ def test_viewport_center_never_becomes_place_coords():
 
 
 def test_true_pin_coords_extracted_over_viewport():
+    # G2 (R3 update): VIEWPORT_PLUS_PIN_URL is a 10z search-viewport URL. The
+    # V2 zoom guard intentionally REJECTS its `!3d/!4d` pair because
+    # production proved 10z "pins" are camera/viewport values (G2-E: four
+    # distinct businesses shared one coordinate pair, all at 10z). Detail
+    # URLs at >=15z (FULL_PLACE_URL, ABERLE_AD_TOKEN_URL) still yield coords.
     d = parse_google_maps_url(VIEWPORT_PLUS_PIN_URL)
-    assert d["lat"] == 29.8677916 and d["lng"] == -95.5618629
+    assert "lat" not in d and "lng" not in d
+
+
+def test_low_zoom_url_coords_rejected():
+    # G02: a 10z fallback URL whose `!8m2!3d…!4d…` is the camera position.
+    d = parse_google_maps_url(LOW_ZOOM_VIEWPORT_URL)
+    assert "lat" not in d and "lng" not in d
+
+
+def test_17z_pin_coords_kept():
+    # The zoom guard must not over-reject real detail-panel pins.
+    d = parse_google_maps_url(ABERLE_AD_TOKEN_URL)  # no zoom marker -> detail default
+    assert d["lat"] == 29.6 and d["lng"] == -95.5
+    d2 = parse_google_maps_url(FULL_PLACE_URL)
+    assert d2["lat"] == 29.7604 and d2["lng"] == -95.3698
+
+
+def test_clean_maps_url_strips_tracking_params():
+    # G12: session/tracking junk must never reach the exported column.
+    dirty = ("https://www.google.com/maps/place/X/@29.8,-95.4,17z"
+             "?authuser=2&entry=gps&g_ep=abc&rclk=1&utm_source=x&hl=en&gl=us")
+    out = clean_maps_url(dirty)
+    for tok in ("authuser", "entry=", "g_ep", "rclk", "utm_"):
+        assert tok not in out
+    assert "hl=en" in out and "gl=us" in out  # legitimate locale params kept
+
+
+def test_clean_maps_url_passthrough_and_empty():
+    u = "https://www.google.com/maps/place/X/@29.8,-95.4,17z"
+    assert clean_maps_url(u) == u
+    assert clean_maps_url("") == ""
+    assert clean_maps_url(None) == ""
 
 
 def test_pipe_and_newline_separated_addresses():

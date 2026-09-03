@@ -2,18 +2,45 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _usable_bash() -> str | None:
+    """Return a bash that actually execs, else None.
+
+    On Windows, `bash` on PATH may be the WSL relay stub
+    (C:\\Windows\\System32\\bash.exe), which exits 1 with
+    "execvpe(/bin/bash) failed" when no WSL distro is installed. The
+    controller itself is POSIX-only; these tests are skipped, not failed,
+    where no usable bash exists.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        return None
+    try:
+        probe = subprocess.run([bash, "-c", "echo ok"], text=True,
+                               capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return bash if (probe.returncode == 0 and "ok" in probe.stdout) else None
+
+
+BASH = _usable_bash()
+
+pytestmark = pytest.mark.skipif(BASH is None, reason="no usable POSIX bash")
 
 
 def _run(command: str, *args: str, **env_overrides: str) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(env_overrides)
     return subprocess.run(
-        ["bash", str(ROOT / "server.sh"), command, *args],
+        [BASH, str(ROOT / "server.sh"), command, *args],
         cwd=ROOT,
         env=env,
         text=True,

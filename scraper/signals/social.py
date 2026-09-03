@@ -45,8 +45,12 @@ _REJECT_SEGMENTS = {
 _PROFILE_PATH = {
     "facebook": re.compile(r"^/(?!sharer|plugins|tr|groups|watch|events|marketplace|photo|videos|story|reel)(?:pages/)?[A-Za-z0-9.\-]{1,}/?$"),
     # The FIRST segment is the handle; a trailing sub-path (e.g. /natgeo/travel/)
-    # is still the handle's profile (F18).
-    "instagram": re.compile(r"^/(?!p/|reel|stories|explore|accounts|tv/)[A-Za-z0-9._]{1,}(?:/.*)?$"),
+    # is still the handle's profile (F18). G05: the sub-path's first segment
+    # must NOT be a post/reel/tv marker — production exported
+    # `instagram.com/<handle>/p/BrlrQ52Hdi3` (a POST) as a profile.
+    "instagram": re.compile(
+        r"^/(?!p/|reel/|tv/|stories/|explore/|accounts/)[A-Za-z0-9._]{1,}"
+        r"(?:/(?!(?:p|reel|tv)(?:/|$))[A-Za-z0-9._/-]*)?$"),
     "linkedin": re.compile(r"^/(?:company|school|in)/[A-Za-z0-9%_.\-]+/?$"),
     "youtube": re.compile(r"^/(?:@|c/|channel/|user/)[A-Za-z0-9_.\-]+/?$"),
     "twitter_x": re.compile(r"^/(?!intent|share|home|search|explore|messages|settings|i/)[A-Za-z0-9_]{1,15}/?$"),

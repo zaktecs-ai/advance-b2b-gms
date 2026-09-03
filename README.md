@@ -438,9 +438,3 @@ handling, and extension guidance, read
 ## License
 
 Original, self-contained code. Not derived from any other project.
-ling, and extension guidance, read
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
-## License
-
-Original, self-contained code. Not derived from any other project.

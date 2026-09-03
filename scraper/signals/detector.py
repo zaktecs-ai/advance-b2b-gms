@@ -280,6 +280,28 @@ _NAME_NOT_PERSON_WORDS = {
     "inc", "co", "plumbing", "plumbers", "services", "service",
     "group", "about", "us", "me", "him", "her", "them",
 }
+# G03: role/department words that inside a captured NAME mark footer/CTA/panel
+# text, not a person ("Ground CREW", "DENTAL ASSISTANT", "Clinical OPERATIONS",
+# "Reservations Schedule", "…EMAIL General"). Title words belong in the TITLE
+# group, never the name, so "manager" is included here too.
+_NAME_ROLE_WORDS = {
+    "assistant", "hygienist", "crew", "operations", "clinical", "email",
+    "reservations", "schedule", "receptionist", "staff", "team", "dept",
+    "department", "coordinator", "supervisor", "dispatcher", "technician",
+    "scheduler", "office", "front", "desk", "dispatch", "manager",
+}
+# G03: heading/link-text shapes ("Why Choose X", "Hotels Near …") that a
+# capitalized 2-4 token match happily swallows.
+_NAME_HEADING_PREFIXES = {"why", "hotels", "hotel", "our", "meet", "welcome",
+                          "about", "the"}
+# G03: place words used in neighborhood/complex names ("Lakewood Highland
+# PARK Kelli") — rejected as NON-FINAL tokens only, so real surname "Park"
+# ("Jessica Park, Owner") keeps passing.
+_NAME_PLACE_WORDS = {
+    "park", "plaza", "center", "centre", "mall", "square", "garden",
+    "gardens", "heights", "hills", "valley", "lake", "creek", "ridge",
+    "village", "crossing", "point", "pointe",
+}
 # Names that END in a title word were forged from a split title ("…Villalobos
 # Vice / PRESIDENT") or a glued CTA; reject them.
 _TITLE_WORDS = {"ceo", "president", "manager", "director", "founder",
@@ -328,6 +350,17 @@ def _looks_like_person(name: str) -> bool:
         return False
     # Reject names that END in a title word (a split title forged a fake name).
     if toks[-1].lower() in _TITLE_WORDS:
+        return False
+    lowered = [t.lower() for t in toks]
+    # G03: role/department words anywhere inside the name reject it.
+    if any(w in _NAME_ROLE_WORDS for w in lowered):
+        return False
+    # G03: heading/link-text shapes ("Why Choose X", "Hotels Near …").
+    if lowered[0] in _NAME_HEADING_PREFIXES:
+        return False
+    # G03: neighborhood/complex names ("Lakewood Highland Park Kelli") carry a
+    # place word in a non-final position.
+    if any(w in _NAME_PLACE_WORDS for w in lowered[:-1]):
         return False
     for t in toks:
         word = re.sub(r"[^\wÀ-ÖØ-öø-ÿ]", "", t)

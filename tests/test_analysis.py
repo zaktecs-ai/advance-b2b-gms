@@ -53,3 +53,30 @@ def test_analyze_full():
 def test_top_review():
     assert top_review([]) == ""
     assert top_review(["great", "excellent service"]) == "excellent service"
+
+
+# --- G04: verb/tokenization junk must never become keywords or hooks --------
+
+def test_keywords_exclude_verb_junk_g2():
+    kws = review_keywords([
+        "They came out and fixed my sink. Gave me options.",
+        "Couldn't ask for better. Installed quickly.",
+    ])
+    for banned in ("came", "gave", "fixed", "installed", "couldn", "ask"):
+        assert banned not in kws
+
+
+def test_pitch_hook_never_says_praising_junk():
+    hook = pitch_hook("Acme", "Plumber", 4.8, 100,
+                      ["came", "gave", "recently"], 0.8)
+    assert "praising came" not in hook
+    assert "praising gave" not in hook
+    assert "praising recently" not in hook
+
+
+def test_keywords_keep_brand_and_topic_tokens():
+    # Business-name tokens and topic words ("plumbing") stay legitimate; only
+    # role words ("plumber") and verbs are junk.
+    kws = review_keywords(["Halo plumbing was awesome, great price."])
+    assert "halo" in kws and "plumbing" in kws
+    assert "awesome" not in kws  # a POSITIVE word, excluded by design

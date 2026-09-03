@@ -44,6 +44,41 @@ _UI_NOISE = {"ago", "month", "months", "week", "weeks", "year", "years",
              "response", "owner", "local", "guide", "helpful", "read",
              "more", "updated"}
 
+# G04: common review VERBS and tokenization artifacts that survive stopword
+# removal but say nothing about the business ("couldn" from "couldn't",
+# "shutt" from "shutting"). In service-business reviews the most frequent
+# surviving tokens are verbs, which produced nonsense pitch hooks like
+# "customers consistently praising installed/gave/came".
+# DESIGN CONSTRAINT: business-name tokens ("cooper", "halo", "yb") and topic
+# words ("plumbing" — unlike the role word "plumber") stay legitimate.
+_JUNK_TOKENS = {
+    # verbs / function words
+    "got", "get", "came", "come", "went", "took", "take", "made", "make",
+    "called", "call", "needed", "need", "put", "did", "done", "said",
+    "told", "gave", "give", "know", "knew", "think", "thought", "want",
+    "wanted", "used", "use", "using", "let", "kept", "keep", "see",
+    "seen", "explained", "fixed", "replaced", "installed", "scheduled",
+    "arrived", "showed", "hired", "recommended", "recommend", "worked",
+    "working", "asked", "ask", "answered", "left", "paid", "charged",
+    "sent", "tried", "found", "believe", "felt", "feel", "noticed",
+    "checked", "helped", "help",
+    # intensifiers / time words not already in _UI_NOISE
+    "definitely", "really", "always", "never", "every", "time",
+    "back", "first", "second", "way", "recently",
+    # generic nouns — NOTE (R11 narrowing): "service"/"services" stay
+    # legitimate keywords because a positive review's only topic-bearing
+    # token is often exactly that ("Great service, very professional…");
+    # blocking them left review_keywords empty on real V1 surfaces.
+    "job", "work", "place", "company", "business",
+    "guy", "guys", "man", "men", "people", "team", "crew", "tech",
+    "technician", "plumber", "plumbers", "home", "house", "money",
+    "price", "prices", "pricing", "experience", "review", "reviews",
+    # contraction stems produced by tokenize() ("couldn't", "didn't", …)
+    "couldn", "wouldn", "shouldn", "didn", "wasn", "isn", "aren",
+    "weren", "hasn", "haven", "won", "don", "ain", "shutt", "shut",
+    "lot", "bit", "etc", "im", "id", "ive", "theyd", "theyre",
+}
+
 
 def sentiment_score(reviews: list[str]) -> float:
     """Return a -1..1 mean sentiment using a transparent lexicon."""
@@ -75,7 +110,7 @@ def review_keywords(reviews: list[str], top_n: int = 5) -> list[str]:
     counter: Counter = Counter()
     for r in reviews:
         for w in tokenize(r):
-            if w in _UI_NOISE:
+            if w in _UI_NOISE or w in _JUNK_TOKENS:
                 continue
             if w not in _STOPWORDS and w not in _POSITIVE and w not in _NEGATIVE:
                 counter[w] += 1
@@ -119,7 +154,9 @@ def pitch_hook(business_name: str, category: str, rating, review_count,
     """Generate a data-grounded opening line for outreach."""
     name = (business_name or "your business").strip()
     cat = (category or "your services").strip().lower()
-    kw = keywords[0] if keywords else cat
+    # G04 belt-and-braces: a junk token that survived review_keywords must
+    # never be pitched as something customers praised.
+    kw = keywords[0] if keywords and keywords[0] not in _JUNK_TOKENS else cat
     try:
         rc = int(review_count)
     except (TypeError, ValueError):

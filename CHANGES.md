@@ -278,3 +278,173 @@ Suite grew 158 → 191 passing tests.
 | README/docs updated | 68 columns, Python 3.11+, migration note |
 | Zero test deletions | yes (updated tests carry R3 comment) |
 | Final report table | this section |
+
+---
+
+# Generation-2 remediation (AUDIT-REMEDIATION-PLAN-V2.md, G01–G13)
+
+Remediation of the forensic Generation-2 audit of the 2000+ record production
+run (`updated_leads.csv`). One entry per G-ID: root cause, files touched,
+tests added, verification evidence.
+
+Suite grew 191 → 215 passing tests. V1 suite (F01–F33) fully green throughout.
+
+---
+
+## G01 — `business_description` = "See photos" / rating-block text (CRITICAL)
+- **Root cause:** `DESCRIPTION_SELECTORS` included the generic body-text class
+  `fontBodyMedium` and the bare `div.PYvSYb`, whose first non-empty match on
+  ~100% of panels is the "See photos" gallery button or the `4.9 (34)` rating
+  block.
+- **Files:** `scraper/maps/collector.py` (authoritative selectors only; new
+  pure `clean_description()` junk guard; `div.PYvSYb` demoted to a text-quality
+  fallback trusted only at >=60 chars).
+- **Tests:** `tests/test_panel_guard.py::test_description_junk_rejected`,
+  `::test_description_real_text_kept`.
+- **Evidence:** all G1-E shapes ("See photos", `4.9 (34)`, "Open 24 hours")
+  now return `N/A`; real editorial text survives.
+
+## G02 — Identical coordinates across distinct businesses (viewport leak)
+- **Root cause:** F05 validated the `!3d…!4d…` token shape but not zoom
+  semantics: on 9z–12z search-viewport fallback URLs that pair is the map
+  CAMERA position (G2-E: 4 businesses shared `29.836095,-95.46119`, all `10z`).
+- **Files:** `scraper/maps/parsing.py` (`parse_google_maps_url` zoom guard:
+  coords only at >=15z; unmarked detail URLs default to 17).
+- **Tests:** `tests/test_maps_parsing.py::test_low_zoom_url_coords_rejected`,
+  `::test_17z_pin_coords_kept`; `test_true_pin_coords_extracted_over_viewport`
+  updated with the R3 comment (10z pins now intentionally rejected).
+- **Evidence:** fixtures `LOW_ZOOM_VIEWPORT_URL` rejected; `FULL_PLACE_URL` /
+  `ABERLE_AD_TOKEN_URL` (17z) still yield coords.
+
+## G03 — Decision-maker role-word / heading false positives
+- **Root cause:** F07 rejected CTA prefixes and duplicated tokens but not
+  (a) role/department words INSIDE the captured name, (b) heading shapes
+  ("Why Choose X", "Hotels Near"), (c) neighborhood names ("Lakewood Highland
+  Park Kelli").
+- **Files:** `scraper/signals/detector.py` (`_NAME_ROLE_WORDS`,
+  `_NAME_HEADING_PREFIXES`, `_NAME_PLACE_WORDS` checked against non-final
+  tokens only, so surname "Park" survives).
+- **Tests:** `tests/test_signals.py::test_no_decision_maker_from_g2_production_false_positives`
+  (all 9 G3-E rows), `::test_real_decision_makers_still_pass_g2` (V1 positives
+  stay green — no over-rejection).
+- **Evidence:** green.
+
+## G04 — `review_keywords` verb/tokenization junk
+- **Root cause:** frequency ranking after stopword removal surfaces review
+  VERBS (`fixed`, `gave`, `installed`) and contraction stems (`couldn`,
+  `shutt`), producing "praising installed" hooks.
+- **Files:** `scraper/analysis/engine.py` (`_JUNK_TOKENS` blocklist in
+  `review_keywords`; `pitch_hook` falls back to the category when the top
+  keyword is junk). R11 narrowing: `service`/`services` kept legitimate —
+  blocking them emptied `review_keywords` on the V1 roundtrip surface.
+- **Tests:** `tests/test_analysis.py::test_keywords_exclude_verb_junk_g2`,
+  `::test_pitch_hook_never_says_praising_junk`,
+  `::test_keywords_keep_brand_and_topic_tokens`.
+- **Evidence:** green; brand/topic tokens ("halo", "plumbing") preserved.
+
+## G05 — Instagram POST URL exported as profile (F18 regression)
+- **Root cause:** the F18 regex checked the negative lookahead only on the
+  FIRST segment, so `/handle/p/<postid>` passed (G5-E: a POST under the
+  brand's old name).
+- **Files:** `scraper/signals/social.py` (sub-path's first segment must not be
+  `p`/`reel`/`tv`).
+- **Tests:** `tests/test_signals.py::test_instagram_post_url_rejected_g2`;
+  V1 `/natgeo/travel/` case stays accepted.
+- **Evidence:** green.
+
+## G06 — Hotel `category` / `business_status` N/A
+- **Root cause:** category selectors targeted only `<button>` variants; status
+  inference ignored the "Open 24 hours" evidence in the hours text.
+- **Files:** `scraper/maps/collector.py` (`CATEGORY_SELECTORS` + div/span
+  variants — never fabricated from the name; new pure `_status_from_hours()`
+  wired only when the status chip missed).
+- **Tests:** `tests/test_panel_guard.py::test_status_from_hours_open24`,
+  `::test_status_from_hours_normal_hours_is_honest_none`.
+- **Evidence:** green; posted ranges stay honest `N/A`.
+
+## G07 — Malformed/agency email contacts
+- **Root cause:** (a) panel CTA text "message hpd@…" glued into
+  `messagehpd@hpdentist.com`; (b) the site developer's free-mail address
+  (`websolid2020@gmail.com`) harvested as the business contact.
+- **Files:** `scraper/utils/normalize.py` (new rejection reasons
+  `cta_glued_local_part` and `agency_freemail_local_part` — the latter only
+  for personal-provider domains on a known different website).
+- **Tests:** `tests/test_email_extract.py::test_clean_rejects_cta_glued_local_part`,
+  `::test_clean_rejects_agency_freemail_local_part`,
+  `::test_clean_keeps_legit_freemail_and_domain_emails`.
+- **Evidence:** green; legitimate free-mail ("david2020@gmail.com") and
+  business-domain addresses unaffected.
+
+## G08 — Per-query "of N" summary never rendered
+- **Root cause:** half-rename — `query_started` wrote `self.query_total`,
+  `set_query_total`/`business_collected` wrote `current_query_total`,
+  `query_done` read the never-updated one.
+- **Files:** `scraper/utils/progress.py` (`query_started` resets
+  `current_query_total`; `query_done` reads it).
+- **Tests:** `tests/test_progress.py::test_query_done_reports_of_n`,
+  `::test_query_total_resets_between_queries`.
+- **Evidence:** summary renders "collected 1 of 7"; totals reset per query.
+
+## G09 — Dead duplicate return in `_extract_scripts`
+- **Root cause:** unreachable duplicated `re.findall` block after the return.
+- **Files:** `scraper/websites/enricher.py`.
+- **Tests:** `python -m compileall` + full suite green.
+- **Evidence:** dead code removed; no behavior change.
+
+## G10 — Docs hygiene
+- **Root cause:** README had a duplicated/corrupted ending block; stale
+  "Python 3.9+" comment in `requirements.txt` (floor is 3.11); no interpreter
+  version guard.
+- **Files:** `README.md` (deduped ending), `requirements.txt`,
+  `scraper/__init__.py` (fail-fast guard with actionable message — the code
+  relies on 3.11+ scoped-flag regex syntax).
+- **Tests:** full suite green on 3.14 (guard is trivially version-gated).
+- **Evidence:** `tail README.md` clean; comment matches `pyproject.toml`.
+
+## G11 — Inconsistent `record_id` formats
+- **Root cause:** `{place_id}:{uuid8}` where place_id itself contains a colon
+  produced 3-colon ids (`0x…:0x…:4cfd2e8c`) alongside 1-colon kgmid ids,
+  breaking `:`-splitting consumers.
+- **Files:** `scraper/pipeline.py` (`_make_record_id` normalizes the strong id,
+  so every id carries exactly ONE colon).
+- **Tests:** `tests/test_pipeline.py::test_record_id_has_exactly_one_colon`,
+  `::test_record_id_fallback_is_bare_uuid`.
+- **Evidence:** green.
+
+## G12 — URL hygiene: tracking params in `google_maps_url`, `plus_code` space
+- **Root cause:** the raw `page.url` (with `authuser`, `entry`, `g_ep`,
+  `rclk`, …) was exported verbatim; plus-code text carried uncollapsed
+  whitespace.
+- **Files:** `scraper/maps/parsing.py` (new pure `clean_maps_url()` — tracking
+  params and `utm_*` stripped, locale `hl`/`gl` kept); `scraper/maps/collector.py`
+  (wired into `_open_and_extract`; new `_clean_plus_code()`).
+- **Tests:** `tests/test_maps_parsing.py::test_clean_maps_url_strips_tracking_params`,
+  `::test_clean_maps_url_passthrough_and_empty`;
+  `tests/test_panel_guard.py::test_plus_code_whitespace_normalized`.
+- **Evidence:** green.
+
+## G13 — Cross-business social contamination (VERIFY → defensive fix)
+- **Root cause:** production row All American Plumbing carried the SAME
+  facebook/instagram handles as Houston Plumbing Expert (a different row).
+  The engine's panel scoping (F01/F02) already narrows the leak path, but an
+  agency-built website or a panel fallback can still carry another business's
+  profile — and nothing stopped one social URL from being committed under two
+  record identities in one run.
+- **Files:** `scraper/pipeline.py` (new serial-pass
+  `SocialOwnershipRegistry`: the first committed record keeps a social URL;
+  later claimants are blanked to `N/A` with a warning).
+- **Tests:** `tests/test_pipeline.py::test_social_ownership_registry_blocks_cross_business_reuse`.
+- **Evidence:** green. Honest limitation: without a live replay we cannot
+  prove which surface leaked; this guard guarantees the exported symptom
+  (one profile on two businesses) cannot recur.
+
+## Generation-2 bonus fix — UnicodeEncodeError on non-UTF-8 stdout
+- **Root cause:** the progress reporter's Unicode glyphs crash under legacy
+  codecs (cp1252) whenever stdout is a pipe — `server.sh demo` aborted
+  mid-header on Windows.
+- **Files:** `scraper/utils/progress.py` (`_make_stdout_encoding_safe()`:
+  `sys.stdout.reconfigure(errors="replace")`).
+- **Tests:** `tests/test_progress.py::test_print_survives_non_utf8_stdout`;
+  `server.sh` help/demo flow now exits cleanly under a cp1252 pipe.
+- **Evidence:** `tests/test_server_controller.py` green where a usable POSIX
+  bash exists (skipped with a clear reason on WSL-stub-only Windows hosts).

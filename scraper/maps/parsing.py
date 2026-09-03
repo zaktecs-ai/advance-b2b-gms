@@ -6,7 +6,7 @@ unit-testable headlessly.
 from __future__ import annotations
 
 import re
-from urllib.parse import unquote
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from ..utils.normalize import normalize_text
 from ..utils.text import to_int
@@ -380,10 +380,19 @@ def parse_google_maps_url(url: str) -> dict:
     # Coordinates: only the true place pin (!3d…!4d…). NEVER the /maps/@
     # viewport center, which is the search camera position, not the business
     # location (F05).
+    #
+    # G02 zoom guard: on SEARCH-viewport fallback URLs the `!8m2!3d…!4d…`
+    # pair equals the map CAMERA position, not the pin (production proof:
+    # four distinct businesses all carried `29.836095,-95.46119`, every URL
+    # at `10z`). True place pins appear on detail URLs rendered at >=15z.
+    # Below that, coords stay absent — N/A is the honest value.
     m3 = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", u)
     if m3:
-        out["lat"] = float(m3.group(1))
-        out["lng"] = float(m3.group(2))
+        mz = re.search(r",(-?\d{1,2})(?:\.\d+)?z", u)
+        zoom = int(mz.group(1)) if mz else 17
+        if zoom >= 15:
+            out["lat"] = float(m3.group(1))
+            out["lng"] = float(m3.group(2))
     m5 = re.search(r"(?:/g/|%2Fg%2F)([0-9a-zA-Z_-]+)", u, re.I)
     if m5:
         out["kgmid"] = m5.group(1)
@@ -404,3 +413,29 @@ def classify_open_status(text: str) -> str:
     if _OPEN_MARKERS.search(text):
         return "Open"
     return "N/A"
+
+
+# G12: session/tracking query params observed polluting exported
+# `google_maps_url` values in production (`authuser`, `entry`, `g_ep`,
+# `rclk`). Locale params (hl/gl) are legitimate and kept.
+_TRACKING_PARAMS = {"authuser", "entry", "g_ep", "g_st", "rclk", "sk",
+                    "sts", "vtk"}
+
+
+def clean_maps_url(url: str | None) -> str:
+    """Strip session/tracking query params and stray whitespace from a Maps URL."""
+    if not url:
+        return ""
+    raw = str(url).strip()
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw
+    if not parts.query:
+        return raw
+    keep = [
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k.lower() not in _TRACKING_PARAMS and not k.lower().startswith("utm_")
+    ]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(keep), "")).strip()

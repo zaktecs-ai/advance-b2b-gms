@@ -102,3 +102,40 @@ def test_prose_at_dot_not_decoded():
     # F17: prose "at/dot" must NOT be decoded into a fake email.
     from scraper.email.extract import extract_emails_from_text
     assert extract_emails_from_text("Order now at shop dot com and save") == []
+
+
+# --- G07: CTA-glued and web-agency contacts ---------------------------------
+
+def test_clean_rejects_cta_glued_local_part():
+    # G7-E: panel text "message hpd@hpdentist.com" glued into
+    # `messagehpd@hpdentist.com`.
+    from scraper.email.extract import clean_emails
+    assert clean_emails(["messagehpd@hpdentist.com"],
+                        website_url="https://hpdentist.com") == []
+    # But the plain handle on the same site stays usable.
+    assert clean_emails(["hpd@hpdentist.com"],
+                        website_url="https://hpdentist.com") == ["hpd@hpdentist.com"]
+
+
+def test_clean_rejects_agency_freemail_local_part():
+    # G7-E2: the site developer's free-mail address harvested as the
+    # business contact.
+    from scraper.email.extract import clean_emails
+    assert clean_emails(["websolid2020@gmail.com"],
+                        website_url="https://oneplumbingexpert.com") == []
+    assert clean_emails(["seopros4u@gmail.com"],
+                        website_url="https://5starplumbing.com") == []
+
+
+def test_clean_keeps_legit_freemail_and_domain_emails():
+    from scraper.email.extract import clean_emails
+    # A personal-name local part on free mail is kept.
+    assert clean_emails(["david2020@gmail.com"],
+                        website_url="https://oneplumbingexpert.com") == [
+        "david2020@gmail.com"]
+    # A business-domain address is never subject to the agency heuristic.
+    assert clean_emails(["webteam@allamerican-plumbing.com"],
+                        website_url="https://allamerican-plumbing.com") == [
+        "webteam@allamerican-plumbing.com"]
+    # A personal-provider email with NO known website is kept (no context).
+    assert clean_emails(["websolid2020@gmail.com"]) == ["websolid2020@gmail.com"]

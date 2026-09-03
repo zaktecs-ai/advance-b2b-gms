@@ -55,6 +55,20 @@ _PERSONAL_PROVIDERS = {
 }
 
 # Suspicious words that, paired with an off-domain email, suggest a junk hit.
+# G07 part 1: CTA verbs glued onto a handle in the local part ("message" +
+# "hpd" -> `messagehpd@hpdentist.com` from panel text "message hpd@…").
+# The local part must NOT start with a CTA verb followed by 2+ more chars.
+_CTA_GLUE_LOCAL_RE = re.compile(
+    r"^(?:message|email|click|hire|reach|talk)(?=[a-z0-9]{2,})", re.I)
+
+# G07 part 2: web-agency/developer local parts on a FREE-MAIL domain
+# (`websolid2020@gmail.com` exported as a plumber's contact). Only applied
+# when the email domain is a personal provider and a different website domain
+# is known — a business's own domain email is never touched by this rule.
+_AGENCY_LOCAL_RE = re.compile(
+    r"^(?:web|dev|seo|digital|design|media|marketing|agency)"
+    r"[a-z_.-]{0,24}[a-z0-9]{0,6}$", re.I)
+
 _SUSPICIOUS_WORDS = {
     "example", "test", "sample", "noreply", "no-reply", "donotreply",
     "spam", "demo", "admin", "info", "contact", "support", "sales",
@@ -373,6 +387,9 @@ def email_rejection_reason(email: str, website_url: str | None = None) -> str | 
         return "vendor_or_disposable_domain"
     if len(e) > 120:
         return "too_long"
+    # G07 part 1: CTA-glued local part ("messagehpd@…").
+    if _CTA_GLUE_LOCAL_RE.match(local):
+        return "cta_glued_local_part"
     if website_url:
         wd = extract_domain(website_url)
         if wd and domain != wd and not is_personal_provider(domain):
@@ -380,6 +397,11 @@ def email_rejection_reason(email: str, website_url: str | None = None) -> str | 
             # data-quality); a suspicious local part is no longer required to
             # trigger rejection, it is simply an additional signal.
             return "off_domain"
+        # G07 part 2: web-developer/agency free-mail addresses harvested from
+        # a business site (`websolid2020@gmail.com` on a plumbing site).
+        if (wd and domain != wd and is_personal_provider(domain)
+                and _AGENCY_LOCAL_RE.match(local)):
+            return "agency_freemail_local_part"
     return None
 
 

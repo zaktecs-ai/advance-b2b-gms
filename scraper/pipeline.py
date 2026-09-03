@@ -57,8 +57,37 @@ _SIGNAL_COLS = ["signal_pricing", "signal_financing", "signal_licensed_insured",
 def _make_record_id(raw: dict) -> str:
     strong = raw.get("kgmid") or raw.get("place_id")
     if strong and str(strong).upper() not in ("N/A", ""):
-        return f"{strong}:{uuid.uuid4().hex[:8]}"
+        # G11: normalize the strong id so every record_id contains exactly
+        # ONE colon (the uuid suffix separator). A place_id like
+        # `0x864…:0x841…` previously produced a 3-colon id, breaking any
+        # consumer that splits record_id on ':'.
+        return f"{str(strong).replace(':', '-')}:{uuid.uuid4().hex[:8]}"
     return uuid.uuid4().hex
+
+
+class SocialOwnershipRegistry:
+    """G13: one social profile belongs to exactly one business.
+
+    Production evidence: All American Plumbing (allamerican-plumbing.com)
+    exported the SAME facebook/instagram handles as Houston Plumbing Expert —
+    a different business row. Whatever the leak path (panel fallback scope,
+    agency-built websites linking another client's socials), a social URL
+    claimed by two distinct record identities in one run is contaminated.
+    The first record to commit keeps it; later claimants are blanked to N/A.
+    """
+
+    def __init__(self) -> None:
+        self._owner: dict[str, str] = {}
+
+    def claim(self, url: str, record_id: str) -> bool:
+        """Claim ``url`` for ``record_id``. False when already owned by another."""
+        if not url or url == "N/A":
+            return True
+        owner = self._owner.get(url)
+        if owner is None:
+            self._owner[url] = record_id
+            return True
+        return owner == record_id
 
 
 class Pipeline:
@@ -76,6 +105,8 @@ class Pipeline:
         self.checkpoint = CheckpointStore(out_dir / "checkpoint.sqlite")
         self.csv = AtomicCSVWriter(out_dir / "leads.csv", OUTPUT_COLUMNS)
         self._reconcile_csv_with_checkpoint()
+        # G13: serial-pass guard against cross-business social contamination.
+        self._social_registry = SocialOwnershipRegistry()
         seeds = self.checkpoint.seed_sets()
         self.resolver = IdentityResolver(
             seen_identities=seeds["identities"],
@@ -287,6 +318,18 @@ class Pipeline:
             self.resolver.rollback(rec)
             self.counters["failed"] += 1
             return
+        # G13: a social URL already committed under a DIFFERENT record is
+        # cross-business contamination — blank it here (the first claimant
+        # keeps the profile).
+        if self.cfg.enrichment.social:
+            for c in _SOCIAL_COLS:
+                u = rec.get(c)
+                if u and u != "N/A" and not self._social_registry.claim(
+                        u, rec["record_id"]):
+                    log.warning(
+                        "social %s already owned by another record — "
+                        "blanking on %s", u, rec.get("business_name"))
+                    rec[c] = "N/A"
         row = {c: rec.get(c, "N/A") for c in OUTPUT_COLUMNS}
         idx = self.csv.append(row)
         self.checkpoint.register_record(

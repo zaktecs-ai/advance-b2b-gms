@@ -22,7 +22,7 @@ from typing import Iterator
 from urllib.parse import quote_plus
 
 from ..signals.social import detect_social
-from .parsing import parse_google_maps_url
+from .parsing import clean_maps_url, parse_google_maps_url
 from .reviews import extract_reviews_from_panel
 from .transform import (
     apply_url_identity,
@@ -130,7 +130,10 @@ RESULT_CARD_SELECTORS = [
 
 NAME_SELECTORS = ['h1.DUwDvf', 'h1[class*="fontHeadline"]', 'h1']
 CATEGORY_SELECTORS = ['button.DkEaL', 'button[jsaction*="category"]',
-                      'button[class*="category"]']
+                      'button[class*="category"]',
+                      # G06: hotel/vertical detail panels render the category
+                      # outside a <button> element.
+                      'div[jsaction*="category"]', 'span[jsaction*="category"]']
 ADDRESS_SELECTORS = ['button[data-item-id="address"]', 'div[data-item-id="address"]',
                      'div[class*="address"]']
 PHONE_SELECTORS = ['button[data-item-id^="phone:tel:"]', 'button[data-item-id^="phone"]']
@@ -147,8 +150,51 @@ HOURS_TABLE_SELECTORS = ['table.eK4R0e', 'table[class*="hours"]']
 HOURS_ROW_SELECTOR = 'button[aria-label*="Copy open hours"]'
 STATUS_SELECTORS = ['span.ZDu9vd', 'div.o0Svhf span',
                     '[aria-label="Open"], [aria-label="Closed"]']
+# G01: only AUTHORITATIVE description sources. The generic
+# `div[class*="fontBodyMedium"]` / bare `div.PYvSYb` selectors matched UI
+# chrome ("See photos" gallery button, the "4.9 (34)" rating block) on ~100%
+# of panels, polluting `business_description` on nearly every exported row.
 DESCRIPTION_SELECTORS = ['div[data-item-id="editorial_summary"]',
-                         'div[class*="fontBodyMedium"]', 'div.PYvSYb']
+                         'div.PZvSYb[data-item-id="editorial-summary"]']
+# Text-quality fallback (G01 part 2): the bare editorial-styled block is only
+# trusted when it is long enough to be real editorial text.
+_DESCRIPTION_FALLBACK_SELECTOR = 'div.PYvSYb'
+_DESC_FALLBACK_MIN_CHARS = 60
+
+# UI chrome / rating-block shapes that must never be exported as a
+# description (defense in depth — see G01 evidence G1-E/G1-E2).
+_DESC_JUNK_RE = re.compile(
+    r"^(?:see\s+(?:all\s+)?photos?|photos?|\d+\s*photos?)$"
+    r"|^\d[.,]\d\s*\(\d[\d,]*\)\s*$"
+    r"|^(?:open|closed)\b", re.I)
+
+
+def clean_description(text: str | None) -> str:
+    """Return a cleaned description, or 'N/A' when the text is UI junk."""
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    if not t or _DESC_JUNK_RE.match(t):
+        return "N/A"
+    return t
+
+
+def _status_from_hours(hours: str | None) -> str | None:
+    """G06: conservative open-state inference from hours text.
+
+    Only unambiguous evidence ("Open 24 hours") is inferred; posted ranges
+    ("8 AM to 5 PM") say nothing about open-right-now, so they yield None.
+    """
+    h = (hours or "").lower()
+    if not h or h == "n/a":
+        return None
+    if re.search(r"open\s*24\s*hours", h):
+        return "Open"
+    return None
+
+
+def _clean_plus_code(text: str | None) -> str:
+    """G12: collapse internal whitespace and strip edges of a plus code."""
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    return t or "N/A"
 ABOUT_SELECTORS = ['div[data-item-id="about"]', 'button[jsaction*="about"]']
 
 
@@ -479,7 +525,8 @@ class MapsCollector:
         data["website"] = _first_attr(page, WEBSITE_SELECTORS[0], "href") or \
             _first_attr(page, WEBSITE_SELECTORS[1], "href") or "N/A"
 
-        data["plus_code"] = _first_text(page, PLUS_CODE_SELECTORS) or "N/A"
+        data["plus_code"] = _clean_plus_code(
+            _first_text(page, PLUS_CODE_SELECTORS))
 
         data["rating"], data["review_count"] = self._extract_rating_reviews(page)
 
@@ -494,13 +541,26 @@ class MapsCollector:
 
         data["business_hours"] = _extract_hours(page)
         data["business_status"] = self._business_status(page)
+        # G06 part 2: when no status chip rendered, a conservative inference
+        # from the hours text ("Open 24 hours" -> Open). Normal posted hours
+        # do NOT imply open-now, so they stay honest "N/A".
+        if data["business_status"] == "N/A":
+            data["business_status"] = _status_from_hours(
+                data["business_hours"]) or "N/A"
         data["claimed_status"] = self._claimed_status(page)
-        data["business_description"] = _first_text(page, DESCRIPTION_SELECTORS) or "N/A"
+        raw_desc = _first_text(page, DESCRIPTION_SELECTORS)
+        if not raw_desc:
+            # G01 text-quality fallback: trust the generic editorial block
+            # only when it is long enough to be real editorial text.
+            fallback = _first_text(page, [_DESCRIPTION_FALLBACK_SELECTOR])
+            if fallback and len(fallback) >= _DESC_FALLBACK_MIN_CHARS:
+                raw_desc = fallback
+        data["business_description"] = clean_description(raw_desc)
         data["about"] = _first_text(page, ABOUT_SELECTORS) or "N/A"
 
         data.update(_extract_social_links(page))
 
-        data["google_maps_url"] = page.url
+        data["google_maps_url"] = clean_maps_url(page.url)
         apply_url_identity(data, page.url)
 
         # Coherence sentinel: the panel's business name must share a token with

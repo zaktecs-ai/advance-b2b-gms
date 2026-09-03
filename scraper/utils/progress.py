@@ -36,6 +36,22 @@ def _now() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
+def _make_stdout_encoding_safe() -> None:
+    """Never crash on a non-UTF-8 stdout (G-fix, found via server.sh demo).
+
+    The reporter emits Unicode glyphs (box drawing, arrows, middle dots).
+    On Windows, or whenever stdout is a pipe, Python may encode with a legacy
+    codec (cp1252) whose charmap cannot represent them, raising
+    UnicodeEncodeError mid-run. Switch the codec's error handler to
+    'replace' so a piped/console run degrades to '?' instead of crashing.
+    """
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
+    except (ValueError, OSError, AttributeError):
+        pass
+
+
 def _truncate(text: str, width: int) -> str:
     text = (text or "").strip().replace("\n", " ")
     if len(text) <= width:
@@ -89,6 +105,7 @@ class ProgressConsole:
         self._last_render = 0.0
         self._render_interval = 0.25  # seconds
         self._header_done = False
+        _make_stdout_encoding_safe()
         # Current-query result total. Kept separate from the result total that
         # was previously also named `query_total` (a method, then shadowed by
         # this attribute), which caused an AttributeError if the footer
@@ -136,7 +153,11 @@ class ProgressConsole:
         self.current_query_text = query_text
         self.query_collected = 0
         self.query_saved = 0
-        self.query_total = 0
+        # G08: the per-query result total lives in current_query_total (kept
+        # distinct from the historical `query_total` method/attribute name that
+        # caused F13). Reset it here so a new query never inherits the
+        # previous query's total.
+        self.current_query_total = 0
         bar = _c(_Color.cyan, f"[{index}/{self.total_queries}] {query_text}")
         self._print("")
         self._print(_c(_Color.bold, "━━━ " + bar + " ━━━"))
@@ -180,7 +201,11 @@ class ProgressConsole:
     def query_done(self) -> None:
         # clear footer, then a per-query summary line
         self._print_footer("")
-        total = f" of {self.query_total}" if self.query_total else ""
+        # G08: read current_query_total (the attribute set_query_total /
+        # business_collected write), not the never-updated `query_total`,
+        # so the summary actually renders "collected N of M".
+        total = (f" of {self.current_query_total}"
+                 if self.current_query_total else "")
         summary = (f"   ↳ collected {self.query_collected}{total} · "
                    f"saved {self.query_saved}")
         self._print(_c(_Color.green, summary))

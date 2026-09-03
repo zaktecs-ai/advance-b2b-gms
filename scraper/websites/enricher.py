@@ -204,9 +204,3 @@ class Enricher:
             html or "",
             flags=re.I,
         )
-
-        return re.findall(
-            r"<script\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]",
-            html or "",
-            flags=re.I,
-        )

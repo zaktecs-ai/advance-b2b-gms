@@ -116,3 +116,58 @@ def test_keyword_word_boundaries():
     assert detect_signals(ctx)["licensed_insured"][0] is False
     ctx2 = PageContext(text="Licensed and insured team.", html="", urls=[], scripts=[])
     assert detect_signals(ctx2)["licensed_insured"][0] is True
+
+
+# --- G03: second-generation production false positives ----------------------
+
+def test_no_decision_maker_from_g2_production_false_positives():
+    # G3-E: 9 fabricated decision makers in the live 2000+ record output.
+    assert extract_decision_maker(
+        "Landen Blackston EMAIL General, General Manager") == ("", "")
+    assert extract_decision_maker(
+        "ALFREDO VALLE GROUND CREW, MANAGER") == ("", "")
+    assert extract_decision_maker(
+        "Isabel DENTAL ASSISTANT Lisa, MANAGER") == ("", "")
+    assert extract_decision_maker(
+        "Clinical Operations Dr. Yu-Tien, Vice President") == ("", "")
+    assert extract_decision_maker("Why Choose AL Rooter, Owner") == ("", "")
+    assert extract_decision_maker("Hotels Near, Partner") == ("", "")
+    assert extract_decision_maker(
+        "Hepzhi Sam Dental Hygienist, Manager") == ("", "")
+    assert extract_decision_maker(
+        "Rene Ortiz. Reservations Schedule, Owner") == ("", "")
+    assert extract_decision_maker(
+        "Lakewood Highland Park Kelli, Owner") == ("", "")
+
+
+def test_real_decision_makers_still_pass_g2():
+    # Real rows from the same production file (Abacus, Busy Bee, Ranch 616,
+    # Sour Duck, Péché, Hexagon, Sour Duck Market) — the role-word expansion
+    # must NOT over-reject.
+    assert extract_decision_maker("Alan O'Neill, CEO") == ("Alan O'Neill", "CEO")
+    assert extract_decision_maker("Dan Glynn, Owner") == ("Dan Glynn", "Owner")
+    assert extract_decision_maker(
+        "Kevin Williamson, founder") == ("Kevin Williamson", "founder")
+    assert extract_decision_maker(
+        "Samantha Miller, Manager") == ("Samantha Miller", "Manager")
+    assert extract_decision_maker(
+        "Derek Weiss, manager") == ("Derek Weiss", "manager")
+    assert extract_decision_maker("Mr. Marrs, General Manager")[0] == "Mr. Marrs"
+    assert extract_decision_maker(
+        "Shiloh Whittier, Manager") == ("Shiloh Whittier", "Manager")
+    # A surname "Park" as the FINAL token keeps passing.
+    assert extract_decision_maker("Jessica Park, Owner") == ("Jessica Park", "Owner")
+
+
+# --- G05: Instagram POST/reel URLs are not profiles (F18 regression) --------
+
+def test_instagram_post_url_rejected_g2():
+    # G5-E: Arts Family Dentistry exported a POST under the brand's old name.
+    assert platform_for_url(
+        "https://instagram.com/lapradafamilydentistry/p/BrlrQ52Hdi3") is None
+    assert platform_for_url(
+        "https://www.instagram.com/someone/reel/ABC123/") is None
+    # V1 cases must keep passing.
+    assert platform_for_url(
+        "https://www.instagram.com/natgeo/travel/") == "instagram"
+    assert platform_for_url("https://instagram.com/acme") == "instagram"

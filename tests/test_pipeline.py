@@ -2,7 +2,7 @@
 from scraper.config import load_config
 from scraper.maps.collector import DemoCollector
 from scraper.models import OUTPUT_COLUMNS
-from scraper.pipeline import Pipeline
+from scraper.pipeline import Pipeline, SocialOwnershipRegistry, _make_record_id
 from scraper.validation.quality import passes_quality, quality_issues
 from scraper.websites.enricher import Enrichment
 
@@ -27,6 +27,35 @@ def test_pipeline_demo_end_to_end(tmp_path):
     for col in OUTPUT_COLUMNS:
         assert col in header
     assert len(lines) > 1
+
+
+# --- G11: record_id format must be colon-consistent --------------------------
+
+def test_record_id_has_exactly_one_colon():
+    # G11-E: a 0x…:0x… place_id used to yield a 3-colon record_id.
+    rid = _make_record_id({"place_id": "0x864e99529345015b:0x841a9bf37302f7e2"})
+    assert rid.count(":") == 1
+    assert rid.startswith("0x864e99529345015b-0x841a9bf37302f7e2:")
+    rid2 = _make_record_id({"kgmid": "1tf719p9"})
+    assert rid2.count(":") == 1 and rid2.startswith("1tf719p9:")
+
+
+def test_record_id_fallback_is_bare_uuid():
+    rid = _make_record_id({})
+    assert ":" not in rid and len(rid) == 32
+
+
+# --- G13: one social profile belongs to exactly one business -----------------
+
+def test_social_ownership_registry_blocks_cross_business_reuse():
+    reg = SocialOwnershipRegistry()
+    assert reg.claim("https://facebook.com/houstonplumbingexperts", "rec-a")
+    # The SAME handle claimed by a DIFFERENT business row is contamination.
+    assert not reg.claim("https://facebook.com/houstonplumbingexperts", "rec-b")
+    # Same owner re-claiming is idempotent; missing values never block.
+    assert reg.claim("https://facebook.com/houstonplumbingexperts", "rec-a")
+    assert reg.claim("N/A", "rec-b")
+    assert reg.claim("", "rec-b")
 
 
 def test_pipeline_maps_decision_maker_fields(tmp_path):
