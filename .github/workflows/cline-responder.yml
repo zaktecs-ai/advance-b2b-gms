@@ -132,7 +132,7 @@ jobs:
           ISSUE_NUMBER: ${{ steps.detect.outputs.issue_number }}
         run: |
           BODY="Cline agent ne is issue ke task par kaam kiya. Reviews ke liye ready."
-          URL="$(gh pr create --title \"Cline: task for issue #$ISSUE_NUMBER\" --body \"$BODY\" 2>&1 || true)"
+          URL="$(gh pr create --title "Cline: task for issue #$ISSUE_NUMBER" --body "$BODY" 2>&1 || true)"
           echo "PR_URL=$URL" >> "$GITHUB_ENV"
 
       # Step 9 - Result reply karo issue pe
