@@ -111,7 +111,7 @@ jobs:
         run: |
           git config user.name "cline-agent[bot]"
           git config user.email "cline-agent[bot]@users.noreply.github.com"
-          BRANCH="cline-agent/issue-$ISSUE_NUMBER"
+          BRANCH="cline-agent/issue-$ISSUE_NUMBER-$GITHUB_RUN_ID"
           git switch -c "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
           git add -A
           if git diff --cached --quiet; then
