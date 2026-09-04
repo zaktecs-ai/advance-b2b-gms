@@ -131,8 +131,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ steps.detect.outputs.issue_number }}
         run: |
-          BODY="Cline agent ne is issue ke task par kaam kiya. Reviews ke liye ready."
-          URL="$(gh pr create --title "Cline: task for issue #$ISSUE_NUMBER" --body "$BODY" 2>&1 || true)"
+          BRANCH="cline-agent/issue-$ISSUE_NUMBER-$GITHUB_RUN_ID"
+          PR_JSON="$(gh api -X POST "repos/$GITHUB_REPOSITORY/pulls" \
+            -f "base=main" \
+            -f "head=$BRANCH" \
+            -f "title=Cline: task for issue #$ISSUE_NUMBER" \
+            -f "body=Cline agent ne is issue ke task par kaam kiya. Reviews ke liye ready." 2>&1 || true)"
+          URL="$(echo "$PR_JSON" | jq -r '.html_url // empty' 2>/dev/null)"
+          if [ -z "$URL" ]; then
+            URL="$PR_JSON"
+          fi
           echo "PR_URL=$URL" >> "$GITHUB_ENV"
 
       # Step 9 - Result reply karo issue pe
