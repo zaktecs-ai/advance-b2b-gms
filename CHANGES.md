@@ -727,3 +727,19 @@ Tests (`tests/test_photo_columns.py`, 4): pure parsing, schema position/count,
 e2e CSV export order + values, old-CSV migration rebuild.
 
 Suite: 242 → 245 passing.
+
+---
+
+## REMOTE-CONTROL-01 — Cline Remote Control pipeline test (issue #1)
+
+- **Problem:** test issue (`@cline` remote control) — verify the GitHub
+  Actions → Cline agent → branch → PR loop end-to-end without touching
+  production code.
+- **Fix (verification, not product change):**
+  - `docs/REMOTE-CONTROL-TEST.md` (new): log of what was verified and the
+    result table (agent detection/auth, headless run, repo health checks,
+    test suite outcome).
+  - `CHANGES.md`: this entry.
+  - No scraper/CLI behavior changed.
+- **Verification evidence:** `python3 -m compileall -q scraper` is clean and
+  the full test suite reports **272 passed** (`python3 -m pytest -q`).
