@@ -1,0 +1,160 @@
+name: Cline Agent (Remote Control)
+
+# Jab kisi issue/comment me @cline likha jaye -> GitHub ki cloud machine pe
+# Cline Agent task karta hai (laptop band ho to bhi ye chalta hai).
+# Task khatam hone pe changes branch + PR ban jaata hai aur result reply kiya jaata hai.
+
+on:
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: cline-agent
+  cancel-in-progress: false
+
+jobs:
+  cline:
+    runs-on: ubuntu-latest
+    if: github.event.issue.pull_request == null
+    steps:
+      # Step 1 - @cline mention check + sirf owner username allow
+      - name: Detect @cline and check author
+        id: detect
+        uses: actions/github-script@v7
+        env:
+          ALLOWED_USERS: ${{ vars.CLINE_ALLOWED_USERS }}
+        with:
+          script: |
+            const body = context.payload.comment?.body || "";
+            const author = context.payload.comment?.user?.login || "";
+            const isPR = !!context.payload.issue?.pull_request;
+            const hit = body.toLowerCase().includes("@cline");
+            const allowedRaw = (process.env.ALLOWED_USERS || "").split(",").map(s=>s.trim()).filter(Boolean);
+            const allowed = allowedRaw.length > 0 ? allowedRaw : [context.repo.owner];
+            const authorized = allowed.includes(author);
+            core.setOutput("run", String(!isPR && hit && authorized));
+            core.setOutput("reason", String(isPR ? "is_pr" : !hit ? "no_mention" : !authorized ? "unauthorized" : "ok"));
+            core.setOutput("issue_number", String(context.payload.issue?.number || ""));
+            core.setOutput("issue_url", context.payload.issue?.html_url || "");
+
+      # Step 2 - Repo copy (jis repo me task karna hai)
+      - name: Checkout repository
+        if: steps.detect.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      # Step 3 - Node 22 (Cline CLI ke liye)
+      - name: Setup Node.js
+        if: steps.detect.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Step 4 - Cline CLI install
+      - name: Install Cline CLI
+        if: steps.detect.outputs.run == 'true'
+        run: |
+          npm install -g cline 2>&1 | tail -5
+          cline --version
+
+      # Step 5 - Tumhare Cline login files restore (GitHub Secrets me base64 se set hote hain)
+      - name: Restore Cline credentials
+        if: steps.detect.outputs.run == 'true'
+        env:
+          CLINE_DIR: ${{ runner.temp }}/cline
+        run: |
+          mkdir -p "$CLINE_DIR/data" "$CLINE_DIR/settings"
+          if [ -n "${{ secrets.CLINE_SECRETS_B64 }}" ]; then
+            echo "${{ secrets.CLINE_SECRETS_B64 }}" | base64 -d > "$CLINE_DIR/data/secrets.json"
+            echo "secrets.json restored ($(wc -c < "$CLINE_DIR/data/secrets.json") bytes)"
+          fi
+          if [ -n "${{ secrets.CLINE_GLOBALSTATE_B64 }}" ]; then
+            echo "${{ secrets.CLINE_GLOBALSTATE_B64 }}" | base64 -d > "$CLINE_DIR/data/globalState.json"
+            echo "globalState.json restored ($(wc -c < "$CLINE_DIR/data/globalState.json") bytes)"
+          fi
+          echo "CLINE_DIR=$CLINE_DIR" >> "$GITHUB_ENV"
+
+      # Step 6 - Agent task chalao (headless, auto-approve)
+      - name: Run Cline agent
+        if: steps.detect.outputs.run == 'true'
+        id: agent
+        env:
+          CLINE_DIR: ${{ runner.temp }}/cline
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.detect.outputs.issue_number }}
+        run: |
+          set -euo pipefail
+          TASK_TEXT="$(gh issue view "$ISSUE_NUMBER" --json title,body -q '.title + "\n\n" + .body')"
+          echo "Running Cline agent for issue #$ISSUE_NUMBER..."
+          PROMPT="You are working in the git repository at $PWD. A user asked this on GitHub (issue #$ISSUE_NUMBER):
+
+          $TASK_TEXT
+
+          Do the requested work. Read relevant files first. Make the changes with the tools available to you (read_files, write, edit, bash). Do NOT run 'git commit' or 'git push' - the CI workflow will handle committing and pushing your changes. If the task is to create a brand-new repository (a new project), create the project folder under a sensibly named directory, e.g. projects/<project-name>/, and mention the folder name clearly. Verify your work when possible (run tests / syntax checks). End your final message with the line: TASK_COMPLETE"
+          cline --config "$CLINE_DIR" -P cline -m "${{ vars.CLINE_MODEL || 'deepseek/deepseek-v4-flash' }}" --yolo --json --timeout 1500 "$PROMPT" | tee /tmp/cline_raw.log | jq -r 'select(.type=="agent_event" and .event.type=="done") | .event.text' | sed 's/\\n/\n/g' > /tmp/cline_final.txt || true
+          if [ ! -s /tmp/cline_final.txt ]; then
+            tail -c 4000 /tmp/cline_raw.log > /tmp/cline_final.txt
+          fi
+          echo "FINAL_TEXT<<EOF" >> "$GITHUB_ENV"
+          cat /tmp/cline_final.txt >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+# Step 7 - Changes commit + nayi branch + push
+      - name: Commit and push changes
+        if: steps.detect.outputs.run == 'true'
+        env:
+          ISSUE_NUMBER: ${{ steps.detect.outputs.issue_number }}
+        run: |
+          git config user.name "cline-agent[bot]"
+          git config user.email "cline-agent[bot]@users.noreply.github.com"
+          BRANCH="cline-agent/issue-$ISSUE_NUMBER"
+          git switch -c "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No code changes to commit."
+            echo "HAS_CHANGES=false" >> "$GITHUB_ENV"
+          else
+            git commit -m "Cline agent: task for issue #$ISSUE_NUMBER" --no-verify
+            git push -u origin "$BRANCH"
+            echo "HAS_CHANGES=true" >> "$GITHUB_ENV"
+            echo "Pushed branch: $BRANCH"
+          fi
+
+      # Step 8 - PR banao (agar changes hue)
+      - name: Create pull request
+        if: steps.detect.outputs.run == 'true' && env.HAS_CHANGES == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.detect.outputs.issue_number }}
+        run: |
+          BODY="Cline agent ne is issue ke task par kaam kiya. Reviews ke liye ready."
+          URL="$(gh pr create --title \"Cline: task for issue #$ISSUE_NUMBER\" --body \"$BODY\" 2>&1 || true)"
+          echo "PR_URL=$URL" >> "$GITHUB_ENV"
+
+      # Step 9 - Result reply karo issue pe
+      - name: Post result to issue
+        if: steps.detect.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.detect.outputs.issue_number }}
+        run: |
+          {
+            echo "✅ **Cline Agent ka result (issue #$ISSUE_NUMBER):**"
+            echo ""
+            echo "\`\`\`"
+            echo "${{ env.FINAL_TEXT }}"
+            echo "\`\`\`"
+            if [ "${{ env.HAS_CHANGES }}" = "true" ]; then
+              echo ""
+              echo "📦 **Changes ready:** ${{ env.PR_URL }}"
+            else
+              echo ""
+              echo "ℹ️ Code me koi files change nahi hui (sirf analysis/answer)."
+            fi
+            echo ""
+            echo "_Triggered by \`@cline\` in this issue._"
+          } > /tmp/comment.md
+          gh issue comment "$ISSUE_NUMBER" --body-file /tmp/comment.md || echo "Comment posting failed"

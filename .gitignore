@@ -25,3 +25,9 @@ server-console.log
 .DS_Store
 .idea/
 .vscode/
+
+# ===== Cline Agent Remote Control - login files (never commit!) =====
+secrets.json
+globalState.json
+.cline-setup/
+REMOTE-CONTROL-SETUP.local.md
