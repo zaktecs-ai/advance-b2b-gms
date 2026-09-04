@@ -46,6 +46,27 @@ def _build_collector(config, demo: bool, browser_manager, progress=None):
     )
 
 
+def _check_chromium() -> str | None:
+    """Preflight: fail fast with ONE clear message when the Playwright
+    Chromium binary is missing, instead of failing every query one by one
+    (the Maps collector raises per query otherwise). Returns None when OK.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return ("Playwright is not installed. Run ./setup.sh or "
+                "`pip install playwright && playwright install chromium`.")
+    try:
+        with sync_playwright() as p:
+            exe = p.chromium.executable_path
+        if exe and not Path(exe).exists():
+            return ("Chromium browser binary is missing. Run "
+                    "`python -m playwright install chromium` (or ./setup.sh).")
+    except Exception as e:  # noqa: BLE001 — driver/env problems surface here
+        return f"Playwright driver problem: {e}"
+    return None
+
+
 def run(config_path: str, demo: bool) -> int:
     try:
         config = load_config(config_path)
@@ -68,6 +89,11 @@ def run(config_path: str, demo: bool) -> int:
     collector = None
     proxy_manager = None
     if not demo:
+        # Preflight: one clear startup error beats 20 per-query failures.
+        chromium_problem = _check_chromium()
+        if chromium_problem:
+            print(f"[setup error] {chromium_problem}", file=sys.stderr)
+            return 1
         # Build the Playwright-backed collector with a shared BrowserManager.
         # BrowserManager is imported lazily so HTTP-only tests don't need it.
         from .browser import BrowserManager, ProxyManager
