@@ -66,18 +66,31 @@ class Enricher:
                  enable_sitemap: bool = True,
                  enable_playwright_fallback: bool = True,
                  page_navigation_timeout_seconds: float = 30.0,
-                 site_delay: tuple = (0.0, 0.0)):
+                 site_delay: tuple = (0.0, 0.0),
+                 gate=None, cooldowns=None,
+                 backoff_base: float = 1.0, backoff_cap: float = 20.0,
+                 respect_retry_after: bool = True,
+                 playwright_pool_size: int = 2,
+                 early_stop: bool = True):
         self._fetcher = Fetcher(timeout=timeout, proxy=proxies,
                                 total_timeout=total_request_timeout,
                                 connect_timeout=connect_timeout,
-                                retries=http_retries)
+                                retries=http_retries,
+                                backoff_base=backoff_base,
+                                backoff_cap=backoff_cap,
+                                gate=gate, cooldowns=cooldowns,
+                                respect_retry_after=respect_retry_after)
         self._max_pages = max_pages
         # website.overall_site_timeout_seconds: wall-clock budget for the WHOLE
         # site crawl (homepage + priority pages); 0 = unlimited.
         self._overall_timeout = float(overall_site_timeout_seconds or 0.0)
         self._enable_sitemap = bool(enable_sitemap)
         self._site_delay = site_delay
-        self._renderer = (PlaywrightRenderer(page_navigation_timeout_seconds)
+        # Early-stop: once the required enrichment signals (emails + social)
+        # are already found, stop fetching further pages from the site.
+        self._early_stop = bool(early_stop)
+        self._renderer = (PlaywrightRenderer(page_navigation_timeout_seconds,
+                                             pool_size=playwright_pool_size)
                           if enable_playwright_fallback else None)
         self._mx = mx_checker
         self._smtp = smtp_verifier
@@ -105,20 +118,30 @@ class Enricher:
         status = resolve_website_status(reason) if reason else "LIVE"
 
         # 2. Crawl a bounded set of internal pages (aggregating HTML),
-        #    respecting the overall site deadline when configured.
+        #    respecting the overall site deadline when configured. Emails and
+        #    social links are extracted INCREMENTALLY per page so crawling can
+        #    early-stop once the required signals are already in hand — no
+        #    pointless fetches once the business fields are satisfied.
         deadline = (time.monotonic() + self._overall_timeout
                     if self._overall_timeout > 0 else None)
         htmls: list[str] = []
+        emails_raw: list[str] = []
+        social_urls: list[str] = []
         if result.html:
             htmls.append(result.html)
+            emails_raw.extend(extract_emails(
+                result.html, rendered_text="", url=website,
+                exclude_selectors=self._exclude_selectors))
+            social_urls.extend(social_urls_from_html(result.html, website))
             try:
                 extra = crawl_priority(result.html, result.final_url or website,
                                        self._max_pages)
             except Exception:
                 extra = []
-            # website.enable_sitemap: merge sitemap.xml-discovered pages into
-            # the priority crawl when the toggle is on.
-            if self._enable_sitemap:
+            # website.enable_sitemap: only spend the /sitemap.xml request when
+            # link discovery was WEAK (fewer candidate pages than the cap).
+            # A healthy homepage link crawl already fills the page budget.
+            if self._enable_sitemap and len(extra) < self._max_pages:
                 try:
                     sm = self._fetcher.fetch(urljoin(website, "/sitemap.xml"))
                     if sm.html:
@@ -133,10 +156,19 @@ class Enricher:
                 if deadline is not None and time.monotonic() > deadline:
                     log.debug("overall site deadline hit for %s", website)
                     break
+                if (self._early_stop and emails_raw and social_urls):
+                    # Required signals already satisfied from the homepage —
+                    # skip the remaining page fetches entirely.
+                    break
                 try:
                     pr = self._fetcher.fetch(page_url)
                     if pr.html:
                         htmls.append(pr.html)
+                        emails_raw.extend(extract_emails(
+                            pr.html, rendered_text="", url=website,
+                            exclude_selectors=self._exclude_selectors))
+                        social_urls.extend(
+                            social_urls_from_html(pr.html, website))
                 except Exception:
                     continue
                 # delays.site_min_seconds/site_max_seconds: polite pacing
@@ -149,16 +181,9 @@ class Enricher:
         if combined_text == "N/A":
             combined_text = ""
 
-        # 3. Extract emails + social + tech.
-        emails_raw: list[str] = []
-        for h in htmls:
-            emails_raw.extend(extract_emails(h, rendered_text="", url=website,
-                                             exclude_selectors=self._exclude_selectors))
+        # 3. Extract emails + social + tech (homepage/pages already scanned
+        #    incrementally above; final cleaning happens here).
         emails = clean_emails(emails_raw, website_url=website)
-
-        social_urls: list[str] = []
-        for h in htmls:
-            social_urls.extend(social_urls_from_html(h, website))
         social = detect_social(social_urls)
         social = {
             platform: normalize_url(url) if url != "N/A" else "N/A"
@@ -217,6 +242,11 @@ class Enricher:
 
     def close(self) -> None:
         self._fetcher.close()
+        if self._renderer is not None:
+            try:
+                self._renderer.close()
+            except Exception:
+                pass
 
     @staticmethod
     def _strip_text(html: str) -> str:

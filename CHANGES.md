@@ -7,6 +7,64 @@ Suite grew 158 → 191 passing tests.
 
 ---
 
+## THROUGHPUT-01 — Continuous producer/consumer enrichment pipeline
+- **Problem:** the pipeline created a `ThreadPoolExecutor` PER BATCH and waited
+  for every batch to drain: Maps discovery idled the workers while assembling
+  the next batch, and each batch tail under-utilized the pool. On a 2–3k
+  business run this meant hours of pipeline idle time.
+- **Fix (architecture, not knob-turning):**
+  - `scraper/pipeline.py`: long-lived worker pool created ONCE per run
+    (`_start_pool`/`_worker_loop`/`_committer_loop`/`_shutdown_pool`).
+    Discovery (producer) streams prepared records into a bounded
+    `queue.Queue` (`concurrency.max_in_flight`, default workers x 4) so
+    memory stays flat; workers consume continuously; a single committer
+    thread serializes every shared-state mutation (dedup rollback, social
+    ownership registry, CSV append, checkpoint) exactly as the batch design
+    did. Workers/committer are exception-proof — one bad record can never
+    shrink the pool or deadlock the bounded queue.
+  - `scraper/websites/rate_limiter.py` (new): `DomainGate` (per-domain
+    concurrency slots, default 1 request at a time per domain), 
+    `DomainCooldowns` (park a domain after 429/503 Retry-After instead of
+    hammering), `parse_retry_after` (seconds + HTTP-date, clamped).
+  - `scraper/websites/fetcher.py`: transient-failure retry (429/503,
+    timeouts, connection errors) with exponential backoff + jitter; Retry-
+    After parks the domain (worker never blocks minutes inline); DNS/TLS/4xx
+    are permanent (no retry storms); explicit `httpx.Limits` connection-pool
+    reuse; testable `transport` injection.
+  - `scraper/websites/browser_pool.py` (new): `concurrency.playwright_workers`
+    (2–4) persistent Chromium browser workers with lazy start and browser
+    reuse for JS-required sites — no more throwaway Chromium per site.
+    `renderer.py` is now a facade over the pool.
+  - `scraper/websites/enricher.py`: emails/social extracted INCREMENTALLY per
+    page with early stop once the required signals are found; sitemap.xml only
+    fetched when the homepage link crawl was weak.
+  - `scraper/websites/tech_detect.py`: `Wappalyzer.latest()` cached process-
+    wide (it re-parsed a ~1MB technologies.json per call).
+  - `scraper/pipeline.py`: runtime stats (`records_per_second`,
+    `avg_enrich_seconds`, `max_enrich_seconds`, `queue_depth_max`,
+    `worker_utilization`) surfaced via `Pipeline.runtime_stats()` and written
+    to `summary.json` under `throughput`.
+- **Config:** `concurrency.website_workers` 16→20 (cap 1–32, 16–25
+  recommended window); new `per_domain_concurrency` (1), `max_in_flight` (0 =
+  auto), `respect_retry_after` (true); `website.retry_backoff_base_seconds` /
+  `website.retry_backoff_cap_seconds`; `playwright_workers` now actually
+  drives the browser pool (default 2).
+- **Tests:** `tests/test_rate_limiter.py` (12), `tests/test_worker_pool.py`
+  (9), `tests/test_benchmark.py` (2); `tests/test_concurrency.py` rewritten
+  for the pool lifecycle. Suite: 241 → 270 passing.
+- **Benchmark:** `scraper/benchmark.py` — local mock-site fleet (one port per
+  site = one rate-limit domain) through the REAL pipeline. Old code (git HEAD,
+  best setting 16 workers) vs new, 60 sites, 300 ms simulated request latency:
+  old 19.8 rec/s; new 27.7 rec/s @16 workers (+40%), 29.6 rec/s @20 workers
+  (+50%). At 50 ms latency: old 38.7 rec/s; new 65.4 rec/s @16 workers
+  (+69%). Early stop additionally cuts real-world requests per site from 4
+  to ~2 (homepage + contact) whenever the contact page yields emails+social,
+  and Wappalyzer caching removes a ~1MB JSON parse per site. Durability,
+  dedup, checkpoint/resume, CSV/XLSX output and schema are byte-for-byte
+  unchanged.
+
+---
+
 ## F01 — Facebook column constant (panel-wide anchor scrape)
 - **Root cause:** `_extract_social_links` harvested anchors from the ENTIRE page
   (including the results feed behind/around the panel), so one business's

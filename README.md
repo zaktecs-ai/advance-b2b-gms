@@ -13,6 +13,47 @@ The export contains **68 producer-backed columns**. Missing values are written a
 > flags (`(?-i:...)`) that need Python 3.11 or newer. Install 3.11+ before
 > running.
 
+## Throughput architecture (continuous producer/consumer)
+
+The engine is built as a continuous pipeline, not a batch system:
+
+```
+Maps discovery (producer)  ->  bounded queue  ->  HTTP enrichment workers
+                                              ->  serial committer -> CSV/DB
+```
+
+* **Discovery never waits for enrichment.** Listings are pushed into
+  enrichment the moment Maps finds them; enrichment keeps running while Maps
+  moves to the next query.
+* **The worker pool is created ONCE per run** (`concurrency.website_workers`,
+  16–25 recommended). There are no per-batch executors and no batch drain
+  waits — a slow website only occupies its own worker slot.
+* **Domain-aware rate limiting** (`concurrency.per_domain_concurrency`, default
+  1): at most one in-flight request per target domain, so aggregate throughput
+  stays high without hammering any single site. `429`/`503` responses honor
+  `Retry-After` (the domain is parked, not hammered) and other transient
+  failures use exponential backoff with jitter.
+* **Playwright fallback is pooled** (`concurrency.playwright_workers`, 2–4):
+  persistent Chromium instances are reused across JS-required sites instead of
+  launching a new browser per site. HTTP stays the primary path.
+* **Early stop:** once emails + social links are already found, remaining
+  pages of a site are not fetched; sitemap.xml is only requested when the
+  homepage link crawl was weak.
+* **Durability is unchanged:** SQLite checkpoint + identity dedup +
+  atomic CSV/XLSX, crash-resume and restart safety all behave exactly as
+  before. Only the commit/export stage is serialized (shared-state safety).
+
+Benchmark a controlled mock-website workload through the real pipeline:
+
+```bash
+python -m scraper.benchmark --sites 120 --workers 20
+python -m scraper.benchmark --compare     # 8 vs 16 vs 24 workers
+```
+
+It reports records/second, average/max enrichment latency, queue-depth peak,
+and worker utilization (the same metrics are written to `summary.json` under
+`throughput`).
+
 ## The simple way: use `server.sh`
 
 You do not need to remember Git, tmux, or Python commands for normal use.

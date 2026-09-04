@@ -9,8 +9,15 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 
 log = logging.getLogger(__name__)
+
+# Wappalyzer.latest() parses a ~1MB technologies.json EVERY call — the single
+# most expensive repeated operation per site. One process-wide analyzer is
+# shared (thread-safe: analyze() is read-only) and built lazily once.
+_WAPPALYZER_LOCK = threading.Lock()
+_WAPPALYZER = None
 
 # Lightweight fallback signatures: tech name -> list of regex patterns.
 _FALLBACK_SIGNATURES: list = [
@@ -73,10 +80,24 @@ def _fallback_detect(html: str, headers: dict[str, str] | None = None) -> list[s
             if any(re.search(p, hay, re.I) for p in patterns)]
 
 
+def _get_wappalyzer():
+    """Return the process-wide cached Wappalyzer (built once, lazily)."""
+    global _WAPPALYZER
+    if _WAPPALYZER is not None:
+        return _WAPPALYZER
+    from Wappalyzer import Wappalyzer  # type: ignore
+
+    with _WAPPALYZER_LOCK:
+        if _WAPPALYZER is None:
+            _WAPPALYZER = Wappalyzer.latest()
+    return _WAPPALYZER
+
+
 def _wappalyzer_detect(url: str, html: str, headers: dict[str, str] | None = None) -> list[str]:
     try:
-        from Wappalyzer import Wappalyzer, WebPage  # type: ignore
-        analyzer = Wappalyzer.latest()
+        from Wappalyzer import WebPage  # type: ignore
+
+        analyzer = _get_wappalyzer()
         wp = WebPage(url=url, html=html, headers=headers or {})
         return list(analyzer.analyze(wp))
     except Exception as e:  # pragma: no cover — library/env dependent

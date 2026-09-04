@@ -6,21 +6,30 @@ filters, and appends surviving records to the atomic CSV before advancing the
 checkpoint. Rejected records roll back their dedup entries so a legitimate
 re-discovery is preserved.
 
-The pipeline maps a compact, producer-backed schema: Maps detail-panel fields
-come from the collector and pure Maps transformations; website enrichment
-populates emails/social/tech/signals/decision makers; MX/SMTP verification fills
-the verification columns; and review analysis drives
-sentiment/lead_score/pitch_hook (with an optional LLM personalized hook).
+Throughput architecture (continuous producer/consumer):
+
+    Maps discovery (producer thread)  ->  bounded work queue
+        ->  long-lived HTTP worker pool (created ONCE per run)
+            ->  serial committer thread  ->  CSV / checkpoint
+
+Discovery streams records into enrichment as they are found; enrichment never
+waits for a batch to assemble and discovery never waits for enrichment to
+drain. A single committer thread keeps every shared-state mutation (dedup
+rollback, social ownership, CSV append, checkpoint) serialized exactly as the
+old batch design did. Domain-aware rate limiting (per-domain slots, Retry-
+After, backoff with jitter) keeps the aggregate throughput polite to each
+individual website.
 """
 from __future__ import annotations
 
 import csv
 import logging
 import os
+import queue
 import re
+import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +54,7 @@ from .utils.normalize import normalize_text
 from .utils.resources import ResourceMonitor, host_details
 from .validation.quality import passes_quality
 from .websites.enricher import Enricher
+from .websites.rate_limiter import DomainCooldowns, DomainGate
 
 log = logging.getLogger(__name__)
 
@@ -184,6 +194,12 @@ class Pipeline:
         # server's real IP (F27).
         proxy_url = (proxy_manager.httpx_proxy() if proxy_manager is not None
                      else None)
+        # Domain-aware rate limiting: per-domain slots + shared cooldown
+        # registry. The GLOBAL cap is the worker pool size; these gates keep
+        # individual domains polite while aggregate throughput stays high.
+        cc = config.concurrency
+        self._gate = DomainGate(per_domain=cc.per_domain_concurrency)
+        self._cooldowns = DomainCooldowns()
         self.enricher = Enricher(
             timeout=config.website.http_read_timeout_seconds,
             max_pages=max_pages,
@@ -205,6 +221,12 @@ class Pipeline:
             proxy_manager=proxy_manager,
             exclude_selectors=config.enrichment.exclude_selectors,
             max_email_length=config.email.max_email_length,
+            gate=self._gate,
+            cooldowns=self._cooldowns,
+            backoff_base=config.website.retry_backoff_base_seconds,
+            backoff_cap=config.website.retry_backoff_cap_seconds,
+            respect_retry_after=cc.respect_retry_after,
+            playwright_pool_size=cc.playwright_workers,
         )
 
         # LLM personalized hook generator (optional, auto-detects API key).
@@ -225,6 +247,28 @@ class Pipeline:
         self.polygons = geojson_polygons(config.geo.polygons) if config.geo.polygons else []
         self.counters = {"collected": 0, "deduped": 0, "filtered": 0,
                          "committed": 0, "failed": 0}
+        # -- Continuous producer/consumer enrichment pool --------------------
+        # Created ONCE per pipeline run. Maps discovery (producer) feeds a
+        # bounded work queue; ``website_workers`` long-lived threads consume
+        # newly discovered websites continuously; a single committer thread
+        # serializes everything that touches shared state (resolver rollback,
+        # social registry, CSV append, checkpoint).
+        cc = config.concurrency
+        self._worker_count = max(1, cc.website_workers)
+        self._max_in_flight = cc.max_in_flight or self._worker_count * 4
+        self._work_q: "queue.Queue[tuple | None]" = queue.Queue(
+            maxsize=self._max_in_flight)
+        self._done_q: "queue.Queue[tuple | None]" = queue.Queue()
+        self._worker_threads: list[threading.Thread] = []
+        self._committer_thread: threading.Thread | None = None
+        self._pool_started = False
+        self._pool_shut = False
+        # Runtime stats (throughput/latency/utilization) for summary.json and
+        # the benchmark harness.
+        self._stats_lock = threading.Lock()
+        self._stats = {"enriched": 0, "enrich_seconds": 0.0,
+                       "enrich_seconds_max": 0.0,
+                       "queue_depth_max": 0, "worker_busy_seconds": 0.0}
         # -- runtime.idle_exit_seconds + summary.json state -----------------
         self._started_mono = time.monotonic()
         self._idle_exit_seconds = float(config.runtime.idle_exit_seconds or 0.0)
@@ -238,6 +282,34 @@ class Pipeline:
         return (self._idle_exit_seconds > 0
                 and (time.monotonic() - self._last_commit_mono)
                 > self._idle_exit_seconds)
+
+    def runtime_stats(self) -> dict:
+        """Throughput/latency/utilization metrics for the enrichment pool.
+
+        - ``records_per_second``: committed rows / elapsed wall clock.
+        - ``avg_enrich_seconds`` / ``max_enrich_seconds``: per-record
+          enrichment latency (fetch + crawl + extract + analyze).
+        - ``queue_depth_max``: peak prepared-but-not-enriched backlog.
+        - ``worker_utilization``: fraction of total worker-thread time spent
+          enriching (1.0 = workers were never idle).
+        """
+        with self._stats_lock:
+            s = dict(self._stats)
+        elapsed = max(1e-6, time.monotonic() - self._started_mono)
+        enriched = s["enriched"] or 1
+        pool_seconds = elapsed * self._worker_count
+        return {
+            "elapsed_seconds": round(elapsed, 2),
+            "records_per_second": round(self.counters["committed"] / elapsed, 3),
+            "enriched": s["enriched"],
+            "avg_enrich_seconds": round(s["enrich_seconds"] / enriched, 3),
+            "max_enrich_seconds": round(s["enrich_seconds_max"], 3),
+            "queue_depth_max": s["queue_depth_max"],
+            "in_flight_cap": self._max_in_flight,
+            "worker_utilization": round(
+                min(1.0, s["worker_busy_seconds"] / pool_seconds), 3),
+            "worker_count": self._worker_count,
+        }
 
     def _migrate_csv_schema(self, csv_path: Path, expected: list[str]) -> None:
         """Rebuild an old-schema leads.csv to the current column contract.
@@ -298,6 +370,7 @@ class Pipeline:
                 self.cfg.summary.sample_interval_seconds)
             self._monitor.start()
         try:
+            self._start_pool()
             for idx, query in enumerate(self.cfg.queries, start=1):
                 if self.checkpoint.is_query_done(query):
                     self._progress.note(f"skipped (already done): {query}")
@@ -310,7 +383,7 @@ class Pipeline:
                 self.checkpoint.register_query(query)
                 self._progress.query_started(idx, query)
                 try:
-                    self._process_query(query)
+                    self._produce_query(query)
                 except _RunIdle:
                     self._progress.note(
                         f"idle exit: no new leads for "
@@ -329,20 +402,119 @@ class Pipeline:
                     self._bm.mark_query()
                     self._bm.recycle()
 
+            # Drain: workers finish every queued task, the committer writes
+            # every enriched record, THEN the run finishes. Discovery already
+            # overlapped enrichment throughout — no per-batch waits happened.
+            self._shutdown_pool()
             self._progress.finish(failed=self.counters['failed'])
             return self.counters
         finally:
             # Summary + XLSX are produced even when a query crashed mid-run.
+            self._shutdown_pool(timeout=10.0)
             self._finalize()
 
-    def _process_query(self, query: str) -> None:
+    # -- continuous enrichment pool -------------------------------------------
+    def _start_pool(self) -> None:
+        """Start the long-lived enrichment workers + committer (once)."""
+        if self._pool_started:
+            return
+        self._pool_started = True
+        for i in range(self._worker_count):
+            t = threading.Thread(target=self._worker_loop,
+                                 name=f"enrich-worker-{i}", daemon=True)
+            t.start()
+            self._worker_threads.append(t)
+        self._committer_thread = threading.Thread(
+            target=self._committer_loop, name="committer", daemon=True)
+        self._committer_thread.start()
+        log.info("enrichment pool started: %d workers, in-flight cap %d, "
+                 "per-domain concurrency %d", self._worker_count,
+                 self._max_in_flight, self.cfg.concurrency.per_domain_concurrency)
+
+    def _worker_loop(self) -> None:
+        """Consume prepared records until a None sentinel arrives."""
+        while True:
+            task = self._work_q.get()
+            if task is None:
+                break
+            rec, sig, query = task
+            t0 = time.monotonic()
+            try:
+                self._safe_enrich(rec)
+            except Exception as e:  # noqa: BLE001 — a worker must NEVER die:
+                # a dead thread silently shrinks the pool and can deadlock the
+                # bounded queue (producer blocks on a full queue forever).
+                log.exception("worker loop error: %s", e)
+                rec["website_status"] = "UNKNOWN"
+                rec["website_failure_reason"] = f"worker_error:{type(e).__name__}"
+                rec.setdefault("emails", "N/A")
+                rec.setdefault("email_count", 0)
+            duration = time.monotonic() - t0
+            with self._stats_lock:
+                s = self._stats
+                s["enriched"] += 1
+                s["enrich_seconds"] += duration
+                s["enrich_seconds_max"] = max(s["enrich_seconds_max"], duration)
+                s["worker_busy_seconds"] += duration
+            self._done_q.put((rec, sig, query))
+
+    def _committer_loop(self) -> None:
+        """Serial commit stage: post-filters -> quality -> CSV + checkpoint.
+
+        All shared-state mutation (resolver rollback, social registry, CSV
+        writer, checkpoint) stays on this single thread, preserving the exact
+        serialization guarantees the batch design had. The loop NEVER dies:
+        an exception during one commit skips that record but keeps draining,
+        so the pipeline can never deadlock on a full work queue.
+        """
+        while True:
+            item = self._done_q.get()
+            if item is None:
+                break
+            rec, sig, query = item
+            try:
+                self._commit_stage(rec, query, sig)
+            except Exception as e:  # noqa: BLE001
+                log.exception("commit failed for %s: %s",
+                              rec.get("business_name"), e)
+                self.counters["failed"] += 1
+
+    def _shutdown_pool(self, timeout: float | None = None) -> None:
+        """Sentinel-shutdown the pool (idempotent).
+
+        Workers finish every queued task before exiting; the committer drains
+        every enriched record before exiting. With ``timeout`` set, threads
+        that don't finish in time are abandoned (daemon threads) so a crash
+        path can never hang the process.
+        """
+        if self._pool_shut or not self._pool_started:
+            self._pool_shut = True
+            return
+        self._pool_shut = True
+        for _ in self._worker_threads:
+            try:
+                self._work_q.put_nowait(None)
+            except queue.Full:
+                # Bounded queue is full of real work; workers reach the
+                # sentinel after draining (blocking put keeps ordering safe).
+                self._work_q.put(None)
+        deadline = time.monotonic() + (timeout if timeout else 3600.0)
+        for t in self._worker_threads:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+        if self._committer_thread is not None:
+            self._done_q.put(None)
+            self._committer_thread.join(
+                timeout=max(0.0, deadline - time.monotonic()))
+
+    def _produce_query(self, query: str) -> None:
+        """Producer stage: stream Maps listings into the enrichment queue.
+
+        Discovery never waits for enrichment to finish and enrichment never
+        waits for the next batch — the bounded queue provides backpressure so
+        memory stays flat while both stages run continuously.
+        """
         keyword = self._split_keyword(query)
         self._query_collected = 0
-        workers = max(1, self.cfg.concurrency.website_workers)
-        # Bound the in-flight batch so memory stays flat regardless of how many
-        # listings a query yields; the batch is drained in serial order.
-        max_batch = workers * 4
-        batch: list[tuple[dict, dict]] = []
         for raw in self.collector.collect(query):
             self.counters["collected"] += 1
             self._query_collected += 1
@@ -356,12 +528,17 @@ class Pipeline:
             prepared = self._dedup_and_prefilter(rec, query)
             if prepared is None:
                 continue
-            batch.append(prepared)
-            if len(batch) >= max_batch:
-                self._drain_batch(batch, query, workers)
-                batch = []
-        if batch:
-            self._drain_batch(batch, query, workers)
+            depth = self._work_q.qsize()
+            with self._stats_lock:
+                st = self._stats
+                if depth > st["queue_depth_max"]:
+                    st["queue_depth_max"] = depth
+            # Blocks when the in-flight cap is reached: natural backpressure.
+            self._work_q.put((prepared[0], prepared[1], query))
+            if self._idle_exceeded():
+                raise _RunIdle(
+                    f"no new leads committed for "
+                    f"{self._idle_exit_seconds:.0f}s")
 
     def _dedup_and_prefilter(self, rec: dict, query: str) -> tuple[dict, dict] | None:
         """Serial pass: assign id, dedup, and run pre-enrichment filters.
@@ -391,26 +568,6 @@ class Pipeline:
             self._progress.business_filtered()
             return None
         return rec, sig
-
-    def _drain_batch(self, batch: list[tuple[dict, dict]], query: str, workers: int) -> None:
-        """Enrich in parallel (I/O-bound), then filter/commit serially in order.
-
-        The dedup resolver, checkpoint, and CSV writer are NOT thread-safe, so
-        only the fetch/enrich/analyze/LLM stage is parallelized; everything that
-        mutates shared state stays on this single thread.
-        """
-        recs = [r for r, _ in batch]
-        if workers > 1 and len(recs) > 1:
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                list(ex.map(self._safe_enrich, recs))
-        else:
-            for rec in recs:
-                self._safe_enrich(rec)
-        for rec, sig in batch:
-            self._commit_stage(rec, query, sig)
-        if self._idle_exceeded():
-            raise _RunIdle(
-                f"no new leads committed for {self._idle_exit_seconds:.0f}s")
 
     def _safe_enrich(self, rec: dict) -> None:
         """Enrich one record without letting a single failure abort the batch.
@@ -642,6 +799,7 @@ class Pipeline:
             "execution_time_seconds": round(
                 time.monotonic() - self._started_mono, 2),
             "counters": dict(self.counters),
+            "throughput": self.runtime_stats(),
             "campaign_details": {
                 "client_name": self.cfg.job.client_name,
                 "queries": list(self.cfg.queries),

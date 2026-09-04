@@ -44,7 +44,11 @@ website:
   overall_site_timeout_seconds: 120
   http_connect_timeout_seconds: 10
   http_read_timeout_seconds: 20
-  http_retries: 1
+  http_retries: 1              # extra attempts for TRANSIENT failures only
+                               # (429/503, timeouts, connection errors) with
+                               # exponential backoff + jitter
+  retry_backoff_base_seconds: 1.0
+  retry_backoff_cap_seconds: 20.0
   page_navigation_timeout_seconds: 30
   use_wappalyzer: true
 
@@ -84,11 +88,28 @@ ai_hook:
   retries: 2
 
 concurrency:
-  website_workers: 16          # parallel website enrichment (I/O-bound); cap = 16
-  playwright_workers: 4        # validated + capped at 4, but currently RESERVED:
-                               # the Maps collector runs ONE sequential browser
-                               # (anti-bot pacing). No runtime effect yet — see
-                               # CHANGES.md "Config tuning verification".
+  # --- Continuous producer/consumer enrichment pool --------------------------
+  # Maps discovery streams records into a bounded queue; website_workers
+  # long-lived threads consume them continuously (the pool is created ONCE
+  # per run — no per-batch executors, no batch drain waits).
+  website_workers: 20          # global HTTP enrichment workers (1-32); the
+                               # global cap for ALL website traffic
+  per_domain_concurrency: 1    # max simultaneous requests PER TARGET DOMAIN.
+                               # 1 = polite default: aggregate throughput
+                               # stays high (20 workers across 20 different
+                               # sites) while no single site gets hammered.
+  max_in_flight: 0             # bounded queue of prepared records; 0 = auto
+                               # (workers x 4). Prevents memory blowup when a
+                               # query floods discovery faster than enrichment.
+  respect_retry_after: true    # honor a site's Retry-After header (429/503)
+                               # with exponential backoff + jitter otherwise.
+  playwright_workers: 2        # persistent Chromium browser workers for the
+                               # JS-required fallback ONLY. Browsers are
+                               # REUSED across sites (lazy-started; no
+                               # per-site launch). HTTP stays the primary
+                               # path. The Maps collector remains ONE
+                               # sequential browser by design (anti-bot
+                               # pacing) — this knob does not parallelize Maps.
 
 delays:
   maps_min_seconds: 2.0

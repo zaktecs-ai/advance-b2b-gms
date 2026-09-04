@@ -81,6 +81,12 @@ class WebsiteConfig(BaseModel):
     http_retries: int = Field(default=1, ge=0, le=10)
     page_navigation_timeout_seconds: float = Field(default=30.0, ge=1.0)
     use_wappalyzer: bool = True
+    # Transient-failure retry policy (429/503/timeouts/connection errors):
+    # exponential backoff with jitter, honoring Retry-After when present.
+    # Backoff sleeps happen OUTSIDE the per-domain slot so a slow site never
+    # blocks unrelated work and retry storms cannot build up.
+    retry_backoff_base_seconds: float = Field(default=1.0, ge=0.0, le=30.0)
+    retry_backoff_cap_seconds: float = Field(default=20.0, ge=1.0, le=120.0)
 
 
 class EmailConfig(BaseModel):
@@ -138,15 +144,31 @@ class LLMHookConfig(BaseModel):
 
 
 class ConcurrencyConfig(BaseModel):
-    """Worker counts actually consumed by the pipeline's enrichment stage.
+    """Worker counts + backpressure knobs for the continuous enrichment stage.
 
-    ``website_workers`` bounds the ThreadPoolExecutor used to parallelize the
-    I/O-bound fetch/enrich/verify work. ``playwright_workers`` is reserved for
-    a future concurrent collector (the Maps collector remains serial by design
-    — a single shared browser drives one detail panel at a time).
+    Architecture: Maps discovery is a *producer* that feeds a bounded work
+    queue; a long-lived pool of ``website_workers`` HTTP worker threads is
+    created ONCE for the whole run and continuously consumes newly discovered
+    websites (no per-batch executor, no drain-wait between batches).
+
+    - ``website_workers``: global HTTP enrichment workers (I/O-bound).
+    - ``per_domain_concurrency``: simultaneous in-flight requests allowed per
+      target domain (1 = polite default; protects individual sites while the
+      global pool stays busy across many different domains).
+    - ``max_in_flight``: bounded queue size for prepared-but-not-yet-enriched
+      records (0 = auto: workers x 4). Prevents uncontrolled memory growth.
+    - ``respect_retry_after``: honor a server's Retry-After header before
+      retrying 429/503 responses.
+    - ``playwright_workers``: persistent Chromium browser workers used by the
+      JS-required fallback pool (browsers are REUSED across sites; HTTP stays
+      the primary path). The Maps collector remains ONE sequential browser by
+      design (anti-bot pacing) — this knob does not parallelize Maps.
     """
-    website_workers: int = Field(default=8, ge=1, le=16)
+    website_workers: int = Field(default=20, ge=1, le=32)
     playwright_workers: int = Field(default=2, ge=1, le=4)
+    per_domain_concurrency: int = Field(default=1, ge=1, le=8)
+    max_in_flight: int = Field(default=0, ge=0)
+    respect_retry_after: bool = True
 
 
 class DelaysConfig(BaseModel):
