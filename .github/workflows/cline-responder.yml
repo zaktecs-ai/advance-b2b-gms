@@ -35,9 +35,10 @@ jobs:
             const isPR = !!context.payload.issue?.pull_request;
             const hit = body.toLowerCase().includes("@cline");
             const allowedRaw = (process.env.ALLOWED_USERS || "").split(",").map(s=>s.trim()).filter(Boolean);
-            const allowed = allowedRaw.length > 0 ? allowedRaw : [context.repo.owner];
+            const allowed = [...new Set([context.repo.owner, ...allowedRaw])];
             const authorized = allowed.includes(author);
             core.setOutput("run", String(!isPR && hit && authorized));
+            console.log("debug: author=" + author + " hit=" + hit + " authorized=" + authorized + " allowed=" + JSON.stringify(allowed));
             core.setOutput("reason", String(isPR ? "is_pr" : !hit ? "no_mention" : !authorized ? "unauthorized" : "ok"));
             core.setOutput("issue_number", String(context.payload.issue?.number || ""));
             core.setOutput("issue_url", context.payload.issue?.html_url || "");
